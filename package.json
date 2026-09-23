@@ -1,0 +1,33 @@
+{
+  "name": "remotecontrol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build && tsc --noEmit && esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/index.js && esbuild server/setup.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/setup.js",
+    "build:native": "sh scripts/build-native.sh",
+    "start": "node dist-server/index.js",
+    "setup": "node dist-server/setup.js",
+    "service:install": "node scripts/launchd.mjs install",
+    "service:uninstall": "node scripts/launchd.mjs uninstall",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@node-rs/argon2": "^2.0.2",
+    "@novnc/novnc": "^1.6.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.9",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.4"
+  }
+}

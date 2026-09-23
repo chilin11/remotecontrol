@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>local.remotecontrol.agent</string>
+  <key>CFBundleName</key><string>Remote Control Agent</string>
+  <key>CFBundleDisplayName</key><string>Remote Control Agent</string>
+  <key>CFBundleExecutable</key><string>RemoteControlAgent</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSScreenCaptureUsageDescription</key><string>Remote Control streams this Mac's screen to your authenticated browser session.</string>
+</dict></plist>
