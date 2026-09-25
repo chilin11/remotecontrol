@@ -1,6 +1,6 @@
 # Remote Control
 
-A private browser remote desktop for one computer. The Node gateway defaults to `127.0.0.1`; trusted-LAN HTTP access is opt-in. On macOS it streams hardware-encoded video to the browser over an authenticated WebSocket, with VNC only as an optional fallback.
+A browser remote desktop for one computer. The Node gateway listens on LAN by default (`0.0.0.0:8787`); use only on a trusted private network or behind HTTPS/VPN. On macOS it streams hardware-encoded video to the browser over an authenticated WebSocket, with VNC only as an optional fallback.
 
 ## Windows: H.264 streaming with experimental HEVC
 
@@ -18,9 +18,9 @@ cd remotecontrol
 powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\windows.ps1
 ```
 
-The script installs locked dependencies, builds the web gateway and Windows agent, asks for an owner password **only on first run**, then serves `http://127.0.0.1:8787`. Existing password/session data in `%LOCALAPPDATA%\RemoteControl` is preserved. Press Ctrl+C to stop; rerun the same command after pulling updates. No service, auto-start task, firewall rule, or public port is created. If another process is already using 8787, stop it yourself before launching a second copy.
+The script installs locked dependencies, builds the web gateway and Windows agent, asks for an owner password **only on first run**, then starts the website on `0.0.0.0:8787`. Open `http://127.0.0.1:8787` on Windows or `http://<Windows-LAN-IP>:8787` from another device on the same trusted LAN. Existing password/session data in `%LOCALAPPDATA%\RemoteControl` is preserved. Press Ctrl+C to stop; rerun after pulling updates. No service, auto-start task or firewall rule is created. Windows Firewall may ask for **Private** network access; do not allow Public. If another process already uses 8787, stop it yourself before launching a second copy.
 
-For another device on a **trusted private LAN only**, run `powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\windows.ps1 -Lan`. This explicitly listens on `0.0.0.0`; Windows Firewall may prompt for **Private** access. Do not allow Public, forward port 8787, or use `-Lan` on hotel/public Wi-Fi. HTTP exposes passwords, cookies, desktop images and input in cleartext; for untrusted networks use an HTTPS tunnel or trusted VPN while keeping the origin bound to localhost. The script never configures HTTPS or a firewall for you.
+For a localhost-only Windows gateway (for example behind an HTTPS tunnel or VPN), add `-Local`: `powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\windows.ps1 -Local`. By default LAN HTTP is unencrypted: do not use direct access on hotel/public Wi-Fi or port-forward 8787. HTTP exposes passwords, cookies, desktop images and input in cleartext; for untrusted networks use an HTTPS tunnel or trusted VPN. The script never configures HTTPS or a firewall for you.
 
 Windows captures with FFmpeg `gdigrab`; `libx264` streams H.264 and optional `libx265` streams HEVC. The viewer tries HEVC when the browser supports the required codec, then falls back to H.264. On LAN HTTP, HEVC is attempted only when the browser reports compatible HEVC MediaSource support. Confirm that frames render and pointer/keyboard/reconnect work, not just that the header says HEVC. Windows software encoding may be slower than macOS hardware encoding. See `native/windows/README.md` for advanced build and protocol details.
 
@@ -72,7 +72,7 @@ For an existing tunnel, point the HTTP origin to `http://127.0.0.1:8787` (or you
 
 ### Trusted-LAN HTTP video test
 
-With a built native agent and owner password configured, start the gateway explicitly for LAN access: `REMOTECONTROL_HOST=0.0.0.0 pnpm start`. On another computer on the same trusted network, visit `http://<Mac-LAN-IP>:8787`, enter the owner password, and press **Connect**. Chrome/Edge on LAN HTTP use H.264 MSE instead of WebCodecs; VNC is not required. Stop the gateway with Ctrl+C when finished. HTTP exposes credentials, sessions, desktop images, and input unencrypted to observers on the network; do not port-forward this port to the Internet.
+With a built native agent and owner password configured, `pnpm start` listens on the Mac's LAN interfaces by default. On another computer on the same trusted private network, visit `http://<Mac-LAN-IP>:8787`, enter the owner password, and press **Connect**. To restrict the gateway to this Mac only (for an HTTPS tunnel, for example), use `REMOTECONTROL_HOST=127.0.0.1 pnpm start`. Chrome/Edge on LAN HTTP use H.264 MSE instead of WebCodecs; VNC is not required. Stop the gateway with Ctrl+C when finished. HTTP exposes credentials, sessions, desktop images, and input unencrypted to observers on the network; do not use direct HTTP on public Wi-Fi or port-forward 8787 to the Internet.
 
 ## Use
 
@@ -89,8 +89,8 @@ With a built native agent and owner password configured, start the gateway expli
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REMOTECONTROL_PORT` | `8787` | Website port; defaults to loopback only |
-| `REMOTECONTROL_HOST` | `127.0.0.1` | Set to `0.0.0.0` only for trusted LAN HTTP testing; also remains reachable at `127.0.0.1` |
+| `REMOTECONTROL_PORT` | `8787` | Website port; LAN-facing by default |
+| `REMOTECONTROL_HOST` | `0.0.0.0` | LAN access by default; set `127.0.0.1` for localhost-only, e.g. with an HTTPS tunnel |
 | `REMOTECONTROL_DATA_DIR` | Windows: `%LOCALAPPDATA%\RemoteControl`; macOS: `~/Library/Application Support/RemoteControl`; Linux: `$XDG_DATA_HOME/RemoteControl` or `~/.local/share/RemoteControl` | Owner hash and sessions database |
 | `REMOTECONTROL_VNC_PORT` | `5900` | Local VNC server port; gateway always connects to `127.0.0.1` |
 
@@ -98,4 +98,4 @@ On Windows, set optional variables in the PowerShell session before `pnpm start`
 
 ## Security
 
-The website owner password is hashed with Argon2id. Sessions use random HttpOnly, SameSite=Strict cookies; HTTPS sessions receive the Secure flag. Mutating API calls and WebSocket upgrades require a matching Origin. noVNC credentials are held only in the current page's memory for reconnection, never persisted by the UI; disconnect, sign out, or authentication failure clears that cache. The gateway only connects to VNC on loopback; it never exposes a VNC proxy port. The gateway defaults to `127.0.0.1`; opting into `REMOTECONTROL_HOST=0.0.0.0` exposes its HTTP service to all reachable network interfaces. Use this only on a trusted LAN: HTTP does **not** encrypt the owner password, session cookie, desktop video, or input. Never port-forward 8787 to the Internet. Keep VNC bound to loopback or blocked from inbound network access by the host firewall, keep its password distinct from the website password, and protect any public tunnel with HTTPS and an access policy. The application has no arbitrary command, file, or network proxy endpoint.
+The website owner password is hashed with Argon2id. Sessions use random HttpOnly, SameSite=Strict cookies; HTTPS sessions receive the Secure flag. Mutating API calls and WebSocket upgrades require a matching Origin. noVNC credentials are held only in the current page's memory for reconnection, never persisted by the UI; disconnect, sign out, or authentication failure clears that cache. The gateway only connects to VNC on loopback; it never exposes a VNC proxy port. The website gateway defaults to `0.0.0.0`, which listens on all IPv4 network interfaces; set `REMOTECONTROL_HOST=127.0.0.1` (Windows quick start: `-Local`) to restrict it. Direct HTTP is appropriate only on a trusted private LAN: HTTP does **not** encrypt the owner password, session cookie, desktop video, or input. Never port-forward 8787 to the Internet or use direct HTTP on hotel/public Wi-Fi. Keep VNC bound to loopback or blocked from inbound network access by the host firewall, keep its password distinct from the website password, and protect any public tunnel with HTTPS and an access policy. The application has no arbitrary command, file, or network proxy endpoint.

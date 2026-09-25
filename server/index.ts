@@ -172,6 +172,7 @@ videoWss.on('connection', (ws: WebSocket, token: string) => {
 });
 
 server.listen(port, gatewayHost, () => {
-  console.log(`Remote Control listening on http://127.0.0.1:${port}`);
+  console.log(`Remote Control listening on http://${gatewayHost === '0.0.0.0' ? '<this-computer-LAN-IP>' : gatewayHost}:${port} (local: http://127.0.0.1:${port})`);
+  if (gatewayHost === '0.0.0.0') console.warn('LAN HTTP is unencrypted. Use only on a trusted private network; use HTTPS or a trusted VPN on public networks.');
   if (!hasOwner()) console.log('Run `pnpm setup` before signing in.');
 });

@@ -1,6 +1,6 @@
-# Run from a signed-in Windows desktop: powershell -NoProfile -File .\scripts\windows.ps1
-# -Lan opts into unencrypted HTTP on a trusted, private LAN only. No firewall rules are changed.
-param([switch]$Lan)
+# Run from a signed-in Windows desktop: powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\windows.ps1
+# LAN HTTP is enabled by default. -Local restricts the gateway to this computer.
+param([switch]$Local)
 $ErrorActionPreference = 'Stop'
 
 function Require-Command([string]$Name, [string]$Install) {
@@ -50,11 +50,12 @@ if ($ownerStatus -eq 2 -or $ownerStatus -eq 3) {
     Write-Host 'Existing owner password preserved.'
 }
 
-if ($Lan) {
-    Write-Warning 'LAN HTTP is unencrypted. Only use on a trusted private network; never on hotel/public Wi-Fi or with port forwarding. No firewall rule is created.'
-    $env:REMOTECONTROL_HOST = '0.0.0.0'
-} else {
+if ($Local) {
     $env:REMOTECONTROL_HOST = '127.0.0.1'
+    Write-Host 'Local-only mode: only this computer can connect.'
+} else {
+    $env:REMOTECONTROL_HOST = '0.0.0.0'
+    Write-Warning 'LAN HTTP is unencrypted. Use only on a trusted private network; never on hotel/public Wi-Fi or with port forwarding. No firewall rule is created.'
 }
-Write-Host "`nOpen http://127.0.0.1:8787 on this computer. Press Ctrl+C to stop."
+Write-Host "`nOpen http://127.0.0.1:8787 locally or http://<Windows-LAN-IP>:8787 from a device on the same private LAN. Press Ctrl+C to stop."
 Run-Step 'Start Remote Control' { & node.exe dist-server/index.js }

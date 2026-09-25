@@ -44,11 +44,11 @@ test('damaged owner database fails closed instead of running setup', () => {
   } finally { rmSync(broken, { recursive: true, force: true }); }
 });
 
-test('Windows quick start remains loopback-only by default and keeps LAN opt-in', () => {
+test('Windows quick start enables LAN by default and offers explicit local-only mode', () => {
   const source = readFileSync(new URL('../scripts/windows.ps1', import.meta.url), 'utf8');
-  assert.match(source, /param\(\[switch\]\$Lan\)/);
-  assert.match(source, /\$env:REMOTECONTROL_HOST = '127\.0\.0\.1'/);
-  assert.match(source, /if \(\$Lan\) \{[\s\S]*\$env:REMOTECONTROL_HOST = '0\.0\.0\.0'/);
+  assert.match(source, /param\(\[switch\]\$Local\)/);
+  assert.match(source, /if \(\$Local\) \{\s*\$env:REMOTECONTROL_HOST = '127\.0\.0\.1'/);
+  assert.match(source, /else \{\s*\$env:REMOTECONTROL_HOST = '0\.0\.0\.0'/);
   assert.match(source, /scripts\/windows-owner\.mjs/);
   assert.doesNotMatch(source, /Set-ExecutionPolicy|New-NetFirewallRule|netsh|winget install\s*$/im);
   const publish = readFileSync(new URL('../scripts/build-windows.mjs', import.meta.url), 'utf8');

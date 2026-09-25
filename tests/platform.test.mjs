@@ -10,7 +10,7 @@ test('platform defaults are safe and use platform-appropriate data locations', (
   assert.equal(defaultDataDir('win32', 'C:\\Users\\alice', { REMOTECONTROL_DATA_DIR: 'D:\\rc-data' }), 'D:\\rc-data');
 });
 
-test('video capability requires an agent executable; gateway and VNC default to loopback', () => {
+test('video capability requires an agent executable; gateway defaults to LAN while VNC stays loopback-only', () => {
   assert.equal(supportsNativeVideo('darwin', '/not/a/real/agent'), false);
   assert.equal(supportsNativeVideo('win32', '/not/a/real/agent.exe'), false);
   assert.equal(supportsNativeVideo('linux', '/not/a/real/agent'), false);
@@ -20,7 +20,7 @@ test('video capability requires an agent executable; gateway and VNC default to 
   assert.equal(agentExecutable('win32', import.meta.url, { REMOTECONTROL_AGENT_PATH: 'C:\\custom\\agent.exe' }), 'C:\\custom\\agent.exe');
   assert.equal(supportsPosixPermissions('win32'), false);
   assert.equal(supportsPosixPermissions('darwin'), true);
-  assert.equal(gatewayHost, '127.0.0.1');
+  assert.equal(gatewayHost, process.env.REMOTECONTROL_HOST || '0.0.0.0');
   assert.equal(vncHost, '127.0.0.1');
   assert.equal(nativeVideoAvailable, supportsNativeVideo(hostPlatform, nativeAgentPath));
 });

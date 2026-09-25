@@ -31,8 +31,8 @@ export function supportsPosixPermissions(platform: NodeJS.Platform): boolean {
 
 export const port = Number(process.env.REMOTECONTROL_PORT || 8787);
 export const dataDir = defaultDataDir(process.platform, os.homedir());
-// Opt-in LAN access: 0.0.0.0 also keeps 127.0.0.1 available to cloudflared.
-export const gatewayHost = process.env.REMOTECONTROL_HOST || '127.0.0.1';
+// LAN by default; set REMOTECONTROL_HOST=127.0.0.1 for loopback-only access.
+export const gatewayHost = process.env.REMOTECONTROL_HOST || '0.0.0.0';
 export const vncHost = '127.0.0.1';
 export const vncPort = Number(process.env.REMOTECONTROL_VNC_PORT || 5900);
 export const hostPlatform = process.platform;
