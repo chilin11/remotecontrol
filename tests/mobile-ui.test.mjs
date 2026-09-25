@@ -1,0 +1,168 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { test } from 'node:test';
+import { transformSync } from 'esbuild';
+
+// Exercise the real UI handlers without a gateway, native agent, or browser socket.
+const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+const handlers = source.slice(source.indexOf('  function videoPoint('), source.indexOf('  function videoKey('));
+function fixture(videoFill = false) {
+  const sent = [];
+  const refs = {
+    videoRef: { current: { sendInput: value => sent.push(value) } },
+    touches: { current: new Map() },
+    gesture: { current: { multi: false, moved: false, started: 0 } },
+    pressedKeys: { current: new Set() },
+    pressedButtons: { current: new Set() },
+    pointerStartedHere: { current: false },
+  };
+  class Video {}
+  const code = transformSync(handlers, { loader: 'ts', format: 'cjs' }).code;
+  const api = new Function(...Object.keys(refs), 'HTMLVideoElement', 'setModifiers', 'mode', 'status', 'videoFill', 'mobileKeys', `${code}; return { pointerDown, pointerMove, pointerUp, releaseVideoInput, videoPoint };`)(...Object.values(refs), Video, () => {}, 'video', 'connected', videoFill, false);
+  const captures = new Set();
+  const target = { width: 1920, height: 1080, focus() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 320, height: 240 }), setPointerCapture: id => captures.add(id), hasPointerCapture: id => captures.has(id), releasePointerCapture: id => captures.delete(id) };
+  const event = (id, x, y, pointerType = 'touch', buttons = 0) => ({ pointerId: id, clientX: x, clientY: y, currentTarget: target, pointerType, buttons, preventDefault() {} });
+  return { ...api, refs, sent, event, target, Video };
+}
+test('touch tap clicks once; movement starts a drag and up releases it', () => {
+  const f = fixture();
+  f.pointerDown(f.event(1, 160, 120));
+  assert.deepEqual(f.sent, [{ type: 'move', x: .5, y: .5 }]);
+  f.pointerUp(f.event(1, 160, 120));
+  assert.deepEqual(f.sent.slice(1), [{ type: 'button', button: 'left', down: true }, { type: 'button', button: 'left', down: false }]);
+  f.sent.length = 0;
+  f.pointerDown(f.event(2, 160, 120));
+  f.refs.gesture.current.started -= 150;
+  f.pointerMove(f.event(2, 190, 120));
+  f.pointerUp(f.event(2, 190, 120));
+  assert.deepEqual(f.sent.filter(v => v.type === 'button').map(v => v.down), [true, false]);
+  assert.deepEqual(f.sent, [
+    { type: 'move', x: .5, y: .5 },
+    { type: 'move', x: .5, y: .5 },
+    { type: 'button', button: 'left', down: true },
+    { type: 'move', x: 190 / 320, y: .5 },
+    { type: 'button', button: 'left', down: false },
+  ]);
+});
+
+test('staggered second finger does not start an accidental left drag', () => {
+  const f = fixture();
+  f.pointerDown(f.event(1, 100, 100));
+  f.pointerMove(f.event(1, 115, 100));
+  f.pointerDown(f.event(2, 200, 100));
+  f.pointerMove(f.event(1, 115, 130));
+  f.pointerUp(f.event(1, 115, 130));
+  f.pointerUp(f.event(2, 200, 100));
+  assert.equal(f.sent.some(v => v.type === 'button' && v.button === 'left'), false);
+  assert.equal(f.sent.some(v => v.type === 'wheel'), true);
+});
+test('two-finger tap right-clicks without a preceding left click', () => {
+  const f = fixture();
+  f.pointerDown(f.event(1, 100, 100)); f.pointerDown(f.event(2, 200, 100));
+  f.pointerUp(f.event(1, 100, 100)); f.pointerUp(f.event(2, 200, 100));
+  assert.deepEqual(f.sent.filter(v => v.type === 'button'), [{ type: 'button', button: 'right', down: true }, { type: 'button', button: 'right', down: false }]);
+});
+test('two-finger movement scrolls and does not click when lifted', () => {
+  const f = fixture();
+  f.pointerDown(f.event(1, 100, 100)); f.pointerDown(f.event(2, 200, 100));
+  f.pointerMove(f.event(1, 100, 130));
+  f.pointerUp(f.event(1, 100, 130)); f.pointerUp(f.event(2, 200, 100));
+  assert.deepEqual(f.sent.filter(v => v.type === 'wheel'), [{ type: 'wheel', dy: -15 }]);
+  assert.equal(f.sent.filter(v => v.type === 'button').length, 0);
+});
+test('cancel/blur releases held inputs and suppresses a later touch click', () => {
+  const f = fixture();
+  f.pointerDown(f.event(1, 100, 100)); f.pointerMove(f.event(1, 140, 100));
+  f.refs.pressedKeys.current.add('ShiftLeft');
+  f.releaseVideoInput();
+  const count = f.sent.length;
+  f.pointerUp(f.event(1, 140, 100));
+  assert.equal(f.sent.length, count);
+  assert.equal(f.refs.pressedKeys.current.size, 0);
+  assert.equal(f.refs.pressedButtons.current.size, 0);
+  assert.ok(f.sent.some(v => v.type === 'key' && v.code === 'ShiftLeft' && !v.down));
+});
+test('letterbox input is ignored; captured desktop drag clamps at image edges', () => {
+  const f = fixture();
+  f.pointerDown(f.event(1, -20, -20, 'mouse', 1));
+  assert.deepEqual(f.sent, []);
+  f.pointerDown(f.event(1, 160, 120, 'mouse', 1));
+  f.pointerMove(f.event(1, -20, -20, 'mouse', 1));
+  assert.deepEqual(f.sent.at(-1), { type: 'move', x: 0, y: 0 });
+  f.pointerUp(f.event(1, -20, -20, 'mouse', 0));
+  assert.equal(f.sent.at(-1).down, false);
+});
+test('MSE pointer geometry uses intrinsic video dimensions', () => {
+  const f = fixture();
+  Object.setPrototypeOf(f.target, f.Video.prototype);
+  f.target.videoWidth = 100; f.target.videoHeight = 100;
+  f.pointerDown(f.event(1, 40, 120));
+  assert.deepEqual(f.sent[0], { type: 'move', x: 0, y: .5 });
+});
+
+for (const mse of [false, true]) {
+  for (const fill of [false, true]) {
+    test(`${mse ? 'MSE' : 'canvas'} ${fill ? 'Fill' : 'Fit'} maps center, visible edges and captured touch drag`, () => {
+      const f = fixture(fill);
+      if (mse) { Object.setPrototypeOf(f.target, f.Video.prototype); f.target.videoWidth = 1920; f.target.videoHeight = 1080; }
+      f.pointerDown(f.event(1, 160, 120));
+      assert.deepEqual(f.sent[0], { type: 'move', x: .5, y: .5 });
+      f.refs.gesture.current.started -= 150;
+      f.pointerMove(f.event(1, -100, 120));
+      assert.ok(Math.abs(f.sent.findLast(v => v.type === 'move').x - (fill ? .125 : 0)) < 1e-10);
+      f.pointerMove(f.event(1, 500, 120));
+      assert.ok(Math.abs(f.sent.findLast(v => v.type === 'move').x - (fill ? .875 : 1)) < 1e-10);
+      f.pointerUp(f.event(1, 500, 120));
+      assert.equal(f.sent.at(-1).down, false);
+    });
+  }
+}
+test('touch in letterbox cannot click or seed a multi-touch gesture', () => {
+  const f = fixture();
+  f.pointerDown(f.event(1, 160, 10)); f.pointerUp(f.event(1, 160, 10));
+  assert.deepEqual(f.sent, []);
+  assert.equal(f.refs.touches.current.size, 0);
+});
+test('MSE without metadata cannot send input', () => {
+  const f = fixture(true);
+  Object.setPrototypeOf(f.target, f.Video.prototype);
+  f.target.videoWidth = 0; f.target.videoHeight = 0;
+  f.pointerDown(f.event(1, 160, 120));
+  assert.deepEqual(f.sent, []);
+});
+
+function viewingFixture(requestFullscreen) {
+  const state = {};
+  const shell = { requestFullscreen };
+  const document = { fullscreenElement: null, async exitFullscreen() { this.fullscreenElement = null; } };
+  const refs = { shellRef: { current: shell }, viewRequest: { current: 0 }, fullscreenButtonRef: { current: { focus() {} } }, document, requestAnimationFrame: callback => callback(), releaseVideoInput() {}, setViewPending: v => state.pending = v, setControlsHidden: v => state.hidden = v, setViewMode: v => state.mode = v, setViewNotice: v => state.notice = v };
+  const code = transformSync(source.slice(source.indexOf('  async function exitViewing('), source.indexOf('  useEffect(() => {\n    const shell = shellRef.current;')), { loader: 'ts' }).code;
+  return { state, shell, document, ...new Function(...Object.keys(refs), `${code}; return { enterViewing, exitViewing };`)(...Object.values(refs)) };
+}
+test('unsupported and rejected fullscreen use theater; exit restores normal', async () => {
+  for (const request of [undefined, async () => { throw new Error('blocked'); }]) {
+    const f = viewingFixture(request);
+    await f.enterViewing();
+    assert.equal(f.state.mode, 'theater');
+    assert.equal(f.state.pending, false);
+    assert.match(f.state.notice, /unavailable/);
+    await f.exitViewing();
+    assert.equal(f.state.mode, 'normal');
+  }
+});
+test('fullscreen success and exit invoke the browser API', async () => {
+  const f = viewingFixture(async () => { f.document.fullscreenElement = f.shell; });
+  await f.enterViewing();
+  assert.equal(f.state.mode, 'fullscreen');
+  await f.exitViewing();
+  assert.equal(f.document.fullscreenElement, null);
+  assert.equal(f.state.mode, 'normal');
+});
+test('late fullscreen fulfillment after exit is unwound', async () => {
+  let resolve;
+  const f = viewingFixture(() => new Promise(done => { resolve = () => { f.document.fullscreenElement = f.shell; done(); }; }));
+  const entered = f.enterViewing();
+  await f.exitViewing(); resolve(); await entered;
+  assert.equal(f.document.fullscreenElement, null);
+  assert.equal(f.state.mode, 'normal');
+});

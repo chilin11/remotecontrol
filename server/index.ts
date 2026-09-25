@@ -6,7 +6,7 @@ import { createConnection, type Socket } from 'node:net';
 import { verify } from '@node-rs/argon2';
 import WebSocket, { WebSocketServer, createWebSocketStream } from 'ws';
 import { hasOwner, ownerHash, createSession, validSession, revokeSession } from './store.js';
-import { port, vncHost, vncPort } from './config.js';
+import { gatewayHost, hostPlatform, nativeVideoAvailable, port, vncHost, vncPort } from './config.js';
 import { attachVideo } from './video.js';
 
 const staticRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
@@ -50,7 +50,7 @@ function headers(res: ServerResponse): void {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' wss: ws:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' wss: ws:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
   res.setHeader('Cache-Control', 'no-store');
 }
 
@@ -73,7 +73,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const pathname = new URL(req.url || '/', 'http://localhost').pathname;
   if (pathname.startsWith('/api/')) {
     if (pathname === '/api/session' && req.method === 'GET') {
-      json(res, 200, { authenticated: validSession(cookie(req), true), configured: hasOwner(), controlling: !!controller || !!videoController });
+      json(res, 200, { authenticated: validSession(cookie(req), true), configured: hasOwner(), controlling: !!controller || !!videoController, nativeVideo: nativeVideoAvailable, hevcVideo: nativeVideoAvailable && (hostPlatform === 'darwin' || hostPlatform === 'win32'), hevcCodecString: hostPlatform === 'win32' ? 'hvc1.1.6.L150.90' : 'hvc1.1.6.L150.B0', hevcMseVideo: hostPlatform === 'win32' });
       return;
     }
     if (req.method !== 'POST' || !sameOrigin(req)) { json(res, 403, { error: 'Forbidden' }); return; }
@@ -96,7 +96,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (pathname === '/api/logout') {
       const token = cookie(req);
       revokeSession(token);
-      if (controller && controller.token === token) controller.ws.close(4001, 'Signed out');
+      if (controller && controller.token === token) { controller.tcp.destroy(); controller.ws.close(4001, 'Signed out'); }
       if (videoController && videoController.token === token) videoController.ws.close(4001, 'Signed out');
       res.setHeader('Set-Cookie', setCookie(req, '', 0));
       json(res, 200, { authenticated: false });
@@ -128,7 +128,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws: WebSocket, token: string) => {
-  if (controller) controller.ws.close(4000, 'Another session took control');
+  if (controller) { controller.tcp.destroy(); controller.ws.close(4000, 'Another session took control'); }
   if (videoController) videoController.ws.close(4000, 'Another session took control');
   const tcp = createConnection({ host: vncHost, port: vncPort });
   controller = { ws, tcp, token };
@@ -157,7 +157,11 @@ wss.on('connection', (ws: WebSocket, token: string) => {
 });
 
 videoWss.on('connection', (ws: WebSocket, token: string) => {
-  if (controller) controller.ws.close(4000, 'Another session took control');
+  if (!nativeVideoAvailable) {
+    ws.close(1008, 'Native video is not supported on this platform');
+    return;
+  }
+  if (controller) { controller.tcp.destroy(); controller.ws.close(4000, 'Another session took control'); }
   if (videoController) videoController.ws.close(4000, 'Another session took control');
   videoController = { ws, token };
   attachVideo(ws);
@@ -167,7 +171,7 @@ videoWss.on('connection', (ws: WebSocket, token: string) => {
   ws.on('close', () => clearInterval(check));
 });
 
-server.listen(port, '127.0.0.1', () => {
+server.listen(port, gatewayHost, () => {
   console.log(`Remote Control listening on http://127.0.0.1:${port}`);
   if (!hasOwner()) console.log('Run `pnpm setup` before signing in.');
 });

@@ -16,8 +16,11 @@ private struct Quality {
 }
 private let quality: Quality = {
     switch qualityName {
-    case "data": return Quality(width: 1280, fps: 24, bitrate: 1_500_000)
-    case "high": return Quality(width: 2560, fps: 60, bitrate: 10_000_000)
+    case "minimal", "low", "hotel", "data": return Quality(width: 1280, fps: 24, bitrate: 1_500_000)
+    case "balanced24": return Quality(width: 2560, fps: 24, bitrate: 5_000_000)
+    case "balanced": return Quality(width: 2560, fps: 30, bitrate: 6_000_000)
+    case "high15": return Quality(width: 3840, fps: 15, bitrate: 8_000_000)
+    case "high": return Quality(width: 3840, fps: 30, bitrate: 14_000_000)
     default: return Quality(width: 1920, fps: 30, bitrate: 4_000_000)
     }
 }()
@@ -48,7 +51,7 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
     var width = 0
     var height = 0
     var pressedKeys = Set<CGKeyCode>()
-    var pressedButton: String?
+    var pressedButtons = Set<String>()
 
     func start() async throws {
         guard codecName == "hevc" || codecName == "h264" else { throw NSError(domain: "RemoteControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported codec"]) }
@@ -60,9 +63,15 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else { throw NSError(domain: "RemoteControl", code: 3, userInfo: [NSLocalizedDescriptionKey: "No display is available"]) }
         displayBounds = CGDisplayBounds(CGDirectDisplayID(display.displayID))
-        let ratio = min(1.0, Double(quality.width) / Double(display.width))
-        width = max(2, (Int(Double(display.width) * ratio) / 2) * 2)
-        height = max(2, (Int(Double(display.height) * ratio) / 2) * 2)
+        // Retina displays expose logical dimensions through SCDisplay and CGDisplayPixelsWide.
+        // Use the active display mode's physical pixel dimensions for sharper capture.
+        let displayMode = CGDisplayCopyDisplayMode(CGDirectDisplayID(display.displayID))
+        let pixelWidth = displayMode?.pixelWidth ?? display.width
+        let pixelHeight = displayMode?.pixelHeight ?? display.height
+        guard pixelWidth >= 2, pixelHeight >= 2 else { throw NSError(domain: "RemoteControl", code: 3, userInfo: [NSLocalizedDescriptionKey: "Display pixel dimensions are unavailable"]) }
+        let ratio = min(1.0, Double(quality.width) / Double(pixelWidth))
+        width = max(2, (Int(Double(pixelWidth) * ratio) / 2) * 2)
+        height = max(2, (Int(Double(pixelHeight) * ratio) / 2) * 2)
         try makeEncoder()
         let config = SCStreamConfiguration()
         config.width = width
@@ -74,9 +83,9 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "remotecontrol.capture"))
         self.stream = stream
-        try await stream.startCapture()
         let codecString = codecName == "hevc" ? "hvc1.1.6.L150.B0" : "avc1.42E032"
         writer.json(["type": "stream", "codec": codecName, "codecString": codecString, "width": width, "height": height, "fps": quality.fps])
+        try await stream.startCapture()
         DispatchQueue.global(qos: .userInteractive).async { self.readInput() }
     }
 
@@ -153,11 +162,16 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
                 guard let x = event["x"] as? Double, let y = event["y"] as? Double else { continue }
                 let point = CGPoint(x: displayBounds.minX + min(max(x, 0), 1) * displayBounds.width, y: displayBounds.minY + min(max(y, 0), 1) * displayBounds.height)
                 lastMouse = point
-                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                let mouseType: CGEventType
+                let mouseButton: CGMouseButton
+                if pressedButtons.contains("right") { mouseType = .rightMouseDragged; mouseButton = .right }
+                else if pressedButtons.contains("left") { mouseType = .leftMouseDragged; mouseButton = .left }
+                else { mouseType = .mouseMoved; mouseButton = .left }
+                CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton)?.post(tap: .cghidEventTap)
             case "button":
                 guard let button = event["button"] as? String, let down = event["down"] as? Bool else { continue }
                 let right = button == "right"
-                pressedButton = down ? button : nil
+                if down { pressedButtons.insert(button) } else { pressedButtons.remove(button) }
                 let kind: CGEventType = right ? (down ? .rightMouseDown : .rightMouseUp) : (down ? .leftMouseDown : .leftMouseUp)
                 CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left)?.post(tap: .cghidEventTap)
             case "wheel":
@@ -169,11 +183,15 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
                 CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down)?.post(tap: .cghidEventTap)
             case "text":
                 guard let text = event["text"] as? String, text.count <= 32 else { continue }
-                for scalar in text.utf16 {
-                    var character = scalar
+                for scalar in text.unicodeScalars {
+                    let units = Array(String(scalar).utf16)
                     for down in [true, false] {
                         if let key = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) {
-                            key.keyboardSetUnicodeString(stringLength: 1, unicodeString: &character)
+                            units.withUnsafeBufferPointer { buffer in
+                                if let characters = buffer.baseAddress {
+                                    key.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: characters)
+                                }
+                            }
                             key.post(tap: .cghidEventTap)
                         }
                     }
@@ -182,7 +200,7 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
             }
         }
         for code in pressedKeys { CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap) }
-        if let button = pressedButton {
+        for button in pressedButtons {
             let right = button == "right"
             CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left)?.post(tap: .cghidEventTap)
         }

@@ -2,16 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { dataDir } from './config.js';
+import { dataDir, supportsPosixPermissions } from './config.js';
 
 export const idleMs = 30 * 60 * 1000;
 export const absoluteMs = 7 * 24 * 60 * 60 * 1000;
 
-fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-fs.chmodSync(dataDir, 0o700);
+fs.mkdirSync(dataDir, { recursive: true, ...(supportsPosixPermissions(process.platform) ? { mode: 0o700 } : {}) });
+if (supportsPosixPermissions(process.platform)) fs.chmodSync(dataDir, 0o700);
 const dbPath = path.join(dataDir, 'remotecontrol.db');
 export const db = new DatabaseSync(dbPath);
-if (fs.existsSync(dbPath)) fs.chmodSync(dbPath, 0o600);
+if (fs.existsSync(dbPath) && supportsPosixPermissions(process.platform)) fs.chmodSync(dbPath, 0o600);
 db.exec(`
   CREATE TABLE IF NOT EXISTS owner (id INTEGER PRIMARY KEY CHECK (id = 1), password_hash TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS sessions (
