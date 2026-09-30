@@ -6,6 +6,12 @@ A browser remote desktop for one computer. The Node gateway listens on LAN by de
 
 Windows has a native **video** agent in `native/windows/`: FFmpeg `gdigrab` captures the logged-in desktop; `libx264` encodes H.264, and optional `libx265` encodes HEVC. A .NET 8 process relays video and handles mouse/keyboard input. The user has run the H.264 Windows path successfully; the newly added HEVC path still needs Windows browser and performance validation. Both encoders are software-based, not Moonlight-style hardware/game capture. VNC is optional fallback, not the video path.
 
+### Windows one-click deployment ZIP
+
+Extract **`remotecontrol-windows-deploy.zip`** completely, then double-click **`Start-Windows.cmd`** inside the extracted folder. The deployment includes the built website/gateway and a self-contained Windows x64 capture agent; **no Git, .NET SDK, or .NET Runtime is needed**. Install Node.js 24+ and FFmpeg once (see `WINDOWS-DEPLOY.md`), then reopen the launcher. Internet access is required to install locked runtime dependencies on first use. This is not a fully offline bundle and FFmpeg is not bundled.
+
+The launcher preserves the existing owner password and sessions, runs in the foreground, and creates no service or firewall rule. It defaults to private-LAN HTTP on port 8787; use `Start-Windows.cmd -Local` for local-only access. An existing 8787 process must be stopped by the user before starting a second copy. If downloaded scripts are blocked, see `WINDOWS-DEPLOY.md`; organization policy is not bypassed.
+
 ### Windows quick start (private GitHub repository)
 
 Use a signed-in Windows 10/11 x64 desktop session. Install **Git, Node.js 24+, .NET 8 SDK, and FFmpeg** once. If a tool is missing, `scripts/windows.ps1` prints a `winget` install command; reopen PowerShell afterward. No global pnpm or separate .NET Desktop Runtime is needed: the script obtains pinned pnpm through npm and publishes a self-contained agent. FFmpeg must support `gdigrab` and `libx264` (`libx265` for HEVC).
@@ -42,7 +48,9 @@ Open Quality, choose a preset, then Apply. Applying a video preset reconnects th
 | Balanced · 24 fps | Mac 2560 px / Windows 1920 px | 24 fps | 5 Mbps | Variable |
 | Balanced · 30 fps | Mac 2560 px / Windows 1920 px | 30 fps | 6 Mbps | Variable |
 | High · 15 fps | Mac 3840 px / Windows 2560 px | 15 fps | 8 Mbps | Variable |
-| High | Mac 3840 px / Windows 2560 px | Mac 30 / Windows 60 fps | 14 Mbps | Variable |
+| High | Mac 3840 px / Windows 2560 px | Mac 30 / Windows up to 60 fps¹ | 14 Mbps | Variable |
+
+¹ Windows H.264 is constrained to Level 5.0: 2560×1440 High falls back to 30 fps; unusual tall/large desktops may also be scaled down or use a lower frame rate. The stream metadata reports the actual dimensions and fps. HEVC presets are unchanged.
 
 Bitrates are encoder targets, **not guaranteed network throughput**; WebSocket overhead and bursts remain. Legacy Minimal/Low bandwidth preferences are moved to Data saver so saved clients stay connectable. Public Wi-Fi is untrusted: access over HTTPS or a trusted VPN; do not expose HTTP port 8787 on public networks.
 

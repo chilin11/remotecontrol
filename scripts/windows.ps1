@@ -1,6 +1,6 @@
 # Run from a signed-in Windows desktop: powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\windows.ps1
 # LAN HTTP is enabled by default. -Local restricts the gateway to this computer.
-param([switch]$Local)
+param([switch]$Local, [switch]$Prebuilt)
 $ErrorActionPreference = 'Stop'
 
 function Require-Command([string]$Name, [string]$Install) {
@@ -18,15 +18,21 @@ if ($env:OS -ne 'Windows_NT') { throw 'Run this script on the Windows desktop yo
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Require-Command 'node.exe' 'winget install --id OpenJS.NodeJS.LTS -e'
 Require-Command 'npm.cmd' 'winget install --id OpenJS.NodeJS.LTS -e'
-Require-Command 'dotnet.exe' 'winget install --id Microsoft.DotNet.SDK.8 -e'
+if (-not $Prebuilt) { Require-Command 'dotnet.exe' 'winget install --id Microsoft.DotNet.SDK.8 -e' }
 $ffmpeg = if ($env:REMOTECONTROL_FFMPEG_PATH) { $env:REMOTECONTROL_FFMPEG_PATH } else { 'ffmpeg.exe' }
 if (-not (Get-Command $ffmpeg -ErrorAction SilentlyContinue)) {
     throw "FFmpeg is required. Install with: winget install --id Gyan.FFmpeg -e`nOpen a new PowerShell window afterward and rerun this script."
 }
 $nodeVersion = & node.exe -p 'process.versions.node'
 if ($LASTEXITCODE -ne 0 -or [int]($nodeVersion.Split('.')[0]) -lt 24) { throw "Node.js 24 or newer is required (found $nodeVersion). Install with: winget install --id OpenJS.NodeJS.LTS -e" }
-$dotnetList = & dotnet.exe --list-sdks
-if ($LASTEXITCODE -ne 0 -or -not ($dotnetList | Where-Object { $_ -match '^8\.' })) { throw 'The .NET 8 SDK is required. Install with: winget install --id Microsoft.DotNet.SDK.8 -e' }
+if (-not $Prebuilt) {
+    $dotnetList = & dotnet.exe --list-sdks
+    if ($LASTEXITCODE -ne 0 -or -not ($dotnetList | Where-Object { $_ -match '^8\.' })) { throw 'The .NET 8 SDK is required. Install with: winget install --id Microsoft.DotNet.SDK.8 -e' }
+} else {
+    foreach ($artifact in @('dist/index.html', 'dist-server/index.js', 'dist-server/setup.js', 'dist-native/windows/RemoteControlAgent.exe')) {
+        if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { throw "Prebuilt deployment is incomplete: missing $artifact. Extract the entire deployment ZIP before starting." }
+    }
+}
 $encoders = & $ffmpeg -hide_banner -encoders 2>&1
 if ($LASTEXITCODE -ne 0 -or -not ($encoders | Where-Object { $_ -match '\blibx264\b' })) { throw 'FFmpeg must include libx264; install a full FFmpeg build.' }
 $devices = & $ffmpeg -hide_banner -devices 2>&1
@@ -35,9 +41,13 @@ if (-not ($encoders | Where-Object { $_ -match '\blibx265\b' })) { Write-Warning
 
 # npm ships with Node; pin pnpm so a separate global installation is not required.
 $pnpm = @('exec', '--yes', '--package=pnpm@10.28.2', '--', 'pnpm')
-Run-Step 'Install locked dependencies' { & npm.cmd @pnpm install --frozen-lockfile }
-Run-Step 'Build website and gateway' { & npm.cmd @pnpm run build }
-Run-Step 'Build self-contained Windows capture agent' { & npm.cmd @pnpm run build:windows }
+if ($Prebuilt) {
+    Run-Step 'Install locked runtime dependencies' { & npm.cmd @pnpm install --prod --frozen-lockfile }
+} else {
+    Run-Step 'Install locked dependencies' { & npm.cmd @pnpm install --frozen-lockfile }
+    Run-Step 'Build website and gateway' { & npm.cmd @pnpm run build }
+    Run-Step 'Build self-contained Windows capture agent' { & npm.cmd @pnpm run build:windows }
+}
 
 # Inspect the existing private owner database without resetting passwords or sessions.
 & node.exe scripts/windows-owner.mjs

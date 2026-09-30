@@ -46,11 +46,24 @@ test('damaged owner database fails closed instead of running setup', () => {
 
 test('Windows quick start enables LAN by default and offers explicit local-only mode', () => {
   const source = readFileSync(new URL('../scripts/windows.ps1', import.meta.url), 'utf8');
-  assert.match(source, /param\(\[switch\]\$Local\)/);
+  assert.match(source, /param\(\[switch\]\$Local, \[switch\]\$Prebuilt\)/);
   assert.match(source, /if \(\$Local\) \{\s*\$env:REMOTECONTROL_HOST = '127\.0\.0\.1'/);
   assert.match(source, /else \{\s*\$env:REMOTECONTROL_HOST = '0\.0\.0\.0'/);
   assert.match(source, /scripts\/windows-owner\.mjs/);
   assert.doesNotMatch(source, /Set-ExecutionPolicy|New-NetFirewallRule|netsh|winget install\s*$/im);
   const publish = readFileSync(new URL('../scripts/build-windows.mjs', import.meta.url), 'utf8');
   assert.match(publish, /'--self-contained', 'true'/);
+});
+
+test('Windows double-click deployment uses prebuilt artifacts without requiring the SDK', () => {
+  const script = readFileSync(new URL('../scripts/windows.ps1', import.meta.url), 'utf8');
+  assert.match(script, /if \(-not \$Prebuilt\) \{ Require-Command 'dotnet\.exe'/);
+  assert.match(script, /if \(\$Prebuilt\) \{\s*Run-Step 'Install locked runtime dependencies' \{ & npm\.cmd @pnpm install --prod --frozen-lockfile \}/);
+  assert.match(script, /Test-Path -LiteralPath \$artifact -PathType Leaf/);
+  const launcher = readFileSync(new URL('../Start-Windows.cmd', import.meta.url), 'utf8');
+  assert.match(launcher, /cd \/d "%~dp0"/);
+  assert.match(launcher, /-ExecutionPolicy RemoteSigned/);
+  assert.match(launcher, /-Prebuilt %\*/);
+  assert.match(launcher, /exit \/b %result%/);
+  assert.doesNotMatch(launcher, /Bypass|Unrestricted|netsh|taskkill/i);
 });

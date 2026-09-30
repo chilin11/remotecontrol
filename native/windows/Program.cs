@@ -69,6 +69,13 @@ internal static class Program
             int height = Math.Max(2, (int)Math.Floor((double)screen.Height * width / screen.Width)) & ~1;
             width = Math.Max(2, width);
             height = Math.Max(2, height);
+            if (!preset.IsHevc)
+            {
+                var limits = VideoLimits.H264Level5(width, height, preset.Fps);
+                width = limits.Width;
+                height = limits.Height;
+                preset = preset with { Fps = limits.Fps };
+            }
             var writer = new PacketWriter();
             return await Agent.RunAsync(writer, preset, screen, width, height);
         }

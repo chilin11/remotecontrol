@@ -13,6 +13,8 @@ This is a .NET 8 Windows console executable that captures the Windows virtual de
 
 From the repository root, use `powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\windows.ps1` for the supported build + first-run setup + local start. The script validates FFmpeg and publishes a self-contained `dist-native/windows/RemoteControlAgent.exe`. For a manual framework-dependent build from this directory:
 
+The prebuilt `remotecontrol-windows-deploy.zip` includes the self-contained Windows x64 agent and built web gateway. Extract it and double-click `Start-Windows.cmd`; only Node.js 24+ and FFmpeg are required on the target. See the root `WINDOWS-DEPLOY.md`. The `-Prebuilt` PowerShell mode installs production dependencies and skips compilation.
+
 ```powershell
 dotnet publish .\RemoteControl.Windows.csproj -c Release -r win-x64 --self-contained false -o .\publish
 ```
@@ -37,6 +39,7 @@ Keep stdout connected to the protocol consumer; logs/errors are emitted as type-
 
 - On LAN HTTP, WebCodecs is usually unavailable. The Windows gateway now attempts HEVC MSE only when the viewing browser reports support for `video/mp4; codecs="hvc1.1.6.L150.90"`; otherwise it uses H.264 MSE. An advertised capability does not guarantee decoding: startup, encoder, or playback failure falls back to H.264. The Windows header status tooltip retains the HEVC failure reason after fallback. The browser must actually support this HEVC profile, and FFmpeg must include `libx265`; macOS playback is unchanged.
 - HEVC uses software `libx265`, `zerolatency`, no B-frames, a closed GOP, and one keyframe per preset FPS. Presets: **data** 1280/24, `ultrafast`, CRF 27; **balanced24** 1920/24 and **balanced** 1920/30, `superfast`, CRF 25; **high15** 2560/15 and **high** 2560/60, `veryfast`, CRF 22. Removed low-resolution preset names remain accepted as aliases for Data saver by older clients. HEVC may add CPU load and latency; actual results depend on the Windows host and FFmpeg build.
+- H.264 keeps its Baseline Level 5.0 codec declaration. Capture dimensions are limited to Level 5.0 frame-size/dimension limits and the frame rate is capped to its macroblock-rate budget; a 2560×1440 High fallback uses 30 fps, while 1920×1080 can retain 60 fps. Metadata, capture rate, and GOP all use the adjusted fps. HEVC is unaffected.
 - FFmpeg/GDI capture and `SystemInformation.VirtualScreen` sizing follow the current interactive desktop and monitor layout. Display topology changes during a session are not renegotiated. Mixed-DPI setups, secure desktop/UAC prompts, protected content, and locked sessions may not capture or accept input correctly.
 - The Annex-B parser expects FFmpeg output with AUD enabled and emits each access unit at the next AUD (normally a one-frame buffering delay). Pending NAL/access units and outgoing packets are bounded to 16 MiB to match the gateway.
 - Dimensions are scaled to an even width, capped at 1280/1920/2560 pixels by the selected preset; height preserves the desktop aspect ratio and is made even. Video presets set 24/24/30/15/60 fps respectively. FFmpeg encoding and screen-capture performance depend on the host.

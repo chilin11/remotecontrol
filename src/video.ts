@@ -174,10 +174,10 @@ export class VideoClient {
         this.onError(`${this.codec === 'hevc' ? 'HEVC' : 'H.264'} decoder rejected the MSE stream.`);
       }
     }, { once: true });
-    if (this.codec === 'hevc') {
-      this.mediaErrorHandler = () => { if (!this.stopped) this.onError('HEVC decoding failed in the video element.'); };
-      this.video.addEventListener('error', this.mediaErrorHandler);
-    }
+    this.mediaErrorHandler = () => {
+      if (!this.stopped) this.onError(`${this.codec === 'hevc' ? 'HEVC' : 'H.264'} decoding failed in the video element.`);
+    };
+    this.video.addEventListener('error', this.mediaErrorHandler);
     this.video.addEventListener('playing', () => {
       if (this.video?.requestVideoFrameCallback) this.video.requestVideoFrameCallback(() => this.markReady());
       else if (this.video && this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) this.markReady();

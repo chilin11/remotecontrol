@@ -154,18 +154,27 @@ test('HTTP MSE selects HEVC only when explicitly enabled and supported, otherwis
   fallbackWhenUnsupported.close();
 });
 
-test('Windows HEVC MSE reports video errors after the first frame and unbinds on close', async (t) => {
-  installMocks(t);
-  FakeMediaSource.hevcSupported = true;
-  const errors = [];
-  const media = videoElement();
-  const client = new VideoClient({ width: 0, height: 0, getContext: () => null }, () => {}, (error) => errors.push(error), () => {}, media);
-  await client.connect('balanced', undefined, 'hvc1.1.6.L150.90', true);
-  FakeWebSocket.latest.onmessage({ data: JSON.stringify({ type: 'stream', codec: 'hevc', codecString: 'hvc1.1.6.L150.90', width: 640, height: 480, format: 'mse' }) });
-  assert.equal(typeof media.listeners.error, 'function');
-  media.listeners.playing();
-  media.listeners.error();
-  assert.deepEqual(errors, ['HEVC decoding failed in the video element.']);
-  client.close();
-  assert.equal(media.listeners.error, undefined);
-});
+for (const codec of ['hevc', 'h264']) {
+  test(`${codec} MSE reports video errors after the first frame and unbinds on close`, async (t) => {
+    installMocks(t);
+    FakeMediaSource.hevcSupported = true;
+    const errors = [];
+    const media = videoElement();
+    let ready;
+    const client = new VideoClient({ width: 0, height: 0, getContext: () => null }, (value) => { ready = value; }, (error) => errors.push(error), () => {}, media);
+    t.after(() => client.close());
+    await client.connect('balanced', codec === 'h264' ? 'h264' : undefined, 'hvc1.1.6.L150.90', true);
+    FakeWebSocket.latest.onopen();
+    FakeWebSocket.latest.onmessage({ data: JSON.stringify({ type: 'stream', codec, codecString: codec === 'hevc' ? 'hvc1.1.6.L150.90' : 'avc1.42E032', width: 640, height: 480, format: 'mse' }) });
+    assert.equal(typeof media.listeners.error, 'function');
+    media.listeners.playing();
+    assert.equal(ready, codec, 'first frame has rendered and cleared the startup timer');
+    const handler = media.listeners.error;
+    handler();
+    assert.deepEqual(errors, [`${codec === 'hevc' ? 'HEVC' : 'H.264'} decoding failed in the video element.`]);
+    client.close();
+    assert.equal(media.listeners.error, undefined);
+    handler();
+    assert.equal(errors.length, 1, 'a queued error after close is ignored');
+  });
+}
