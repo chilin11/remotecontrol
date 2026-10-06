@@ -6,9 +6,12 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build && tsc --noEmit && esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/index.js && esbuild server/setup.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/setup.js && esbuild server/config.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/config.js",
+    "build": "vite build && tsc --noEmit && esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/index.js && esbuild server/setup.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/setup.js && esbuild server/config.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/config.js && esbuild server/desktop.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/desktop.js",
     "build:native": "sh scripts/build-native.sh",
     "build:windows": "node scripts/build-windows.mjs",
+    "package:mac": "pnpm build && pnpm build:native && node scripts/package-desktop.mjs mac && node scripts/package-dmg.mjs",
+    "package:windows": "pnpm build && pnpm build:windows && node scripts/package-desktop.mjs windows",
+    "package:dmg": "node scripts/package-dmg.mjs",
     "start": "node dist-server/index.js",
     "setup": "node dist-server/setup.js",
     "service:install": "node scripts/launchd.mjs install",

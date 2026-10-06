@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ScreenCaptureKit
 import VideoToolbox
@@ -52,6 +53,12 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
     var height = 0
     var pressedKeys = Set<CGKeyCode>()
     var pressedButtons = Set<String>()
+    var lastClickTime: TimeInterval = 0
+    var lastClickPoint = CGPoint.zero
+    var lastClickButton = ""
+    var clickCount: Int64 = 1
+    var clickDragged = false
+    var pressPoint = CGPoint.zero
 
     func start() async throws {
         guard codecName == "hevc" || codecName == "h264" else { throw NSError(domain: "RemoteControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported codec"]) }
@@ -167,26 +174,45 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
                 if pressedButtons.contains("right") { mouseType = .rightMouseDragged; mouseButton = .right }
                 else if pressedButtons.contains("left") { mouseType = .leftMouseDragged; mouseButton = .left }
                 else { mouseType = .mouseMoved; mouseButton = .left }
+                if !pressedButtons.isEmpty && hypot(point.x - pressPoint.x, point.y - pressPoint.y) > 5 { clickDragged = true }
                 CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton)?.post(tap: .cghidEventTap)
             case "button":
                 guard let button = event["button"] as? String, let down = event["down"] as? Bool else { continue }
+                guard button == "left" || button == "right" else { continue }
                 let right = button == "right"
-                if down { pressedButtons.insert(button) } else { pressedButtons.remove(button) }
+                let now = ProcessInfo.processInfo.systemUptime
+                if down {
+                    clickCount = button == lastClickButton && now - lastClickTime < 0.5 && hypot(lastMouse.x - lastClickPoint.x, lastMouse.y - lastClickPoint.y) < 6 ? 2 : 1
+                    clickDragged = false
+                    pressPoint = lastMouse
+                    pressedButtons.insert(button)
+                } else {
+                    pressedButtons.remove(button)
+                    if !clickDragged { lastClickButton = button; lastClickTime = now; lastClickPoint = lastMouse }
+                    else { lastClickButton = "" }
+                }
                 let kind: CGEventType = right ? (down ? .rightMouseDown : .rightMouseUp) : (down ? .leftMouseDown : .leftMouseUp)
-                CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left)?.post(tap: .cghidEventTap)
+                if let mouse = CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left) {
+                    mouse.setIntegerValueField(.mouseEventClickState, value: clickCount)
+                    mouse.post(tap: .cghidEventTap)
+                }
             case "wheel":
                 guard let dy = event["dy"] as? Int else { continue }
                 CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(max(-1000, min(1000, -dy))), wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
             case "key":
                 guard let code = event["code"] as? String, let down = event["down"] as? Bool, let keyCode = Self.keyCodes[code] else { continue }
                 if down { pressedKeys.insert(keyCode) } else { pressedKeys.remove(keyCode) }
-                CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down)?.post(tap: .cghidEventTap)
+                if let key = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down) {
+                    key.flags = (event["fn"] as? Bool == true ? key.flags.union(.maskSecondaryFn) : key.flags.subtracting(.maskSecondaryFn))
+                    key.post(tap: .cghidEventTap)
+                }
             case "text":
                 guard let text = event["text"] as? String, text.count <= 32 else { continue }
                 for scalar in text.unicodeScalars {
                     let units = Array(String(scalar).utf16)
                     for down in [true, false] {
                         if let key = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) {
+                            key.flags = key.flags.subtracting(.maskSecondaryFn)
                             units.withUnsafeBufferPointer { buffer in
                                 if let characters = buffer.baseAddress {
                                     key.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: characters)
@@ -199,7 +225,12 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
             default: break
             }
         }
-        for code in pressedKeys { CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap) }
+        for code in pressedKeys {
+            if let key = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) {
+                key.flags = key.flags.subtracting(.maskSecondaryFn)
+                key.post(tap: .cghidEventTap)
+            }
+        }
         for button in pressedButtons {
             let right = button == "right"
             CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left)?.post(tap: .cghidEventTap)
@@ -213,7 +244,13 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
 }
 
 @main struct Main {
-    static func main() async {
+    @MainActor static func main() async {
+        if CommandLine.arguments.count == 1 || CommandLine.arguments.contains("--desktop") {
+            DesktopHost.launch()
+            return
+        }
+        // Capture is a headless child of the desktop host, never a second Dock app.
+        NSApplication.shared.setActivationPolicy(.prohibited)
         let agent = Agent()
         do {
             try await agent.start()

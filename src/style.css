@@ -91,9 +91,11 @@ h2 { margin: 0 0 12px; font-size: 26px; font-weight: 600; letter-spacing: -.035e
 .audio-note, .transport-note { font-size: 11px; color: var(--muted); line-height: 1.6; }
 .transport-note { flex-basis: 100%; }
 .keys button { min-width: 44px; background: #232d39; }
-.clipboard-panel { position: absolute; z-index: 4; bottom: 12px; right: 12px; width: min(360px,calc(100% - 24px)); max-height: calc(100% - 24px); overflow: auto; padding: 16px; display: grid; gap: 12px; border: 1px solid #536173; border-radius: 12px; background: var(--surface); box-shadow: 0 16px 48px #0006; }
+.clipboard-panel { flex: 0 1 auto; min-height: 0; max-height: min(240px,40%); overflow: auto; padding: 8px 16px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; border-top: 1px solid #536173; background: var(--surface); }
+.clipboard-panel .panel-heading { grid-column: 1 / -1; }
+.clipboard-panel > button { align-self: start; }
 .panel-heading { display: flex; justify-content: space-between; align-items: center; }
-.clipboard-panel textarea { width: 100%; min-height: 100px; max-height: 160px; resize: vertical; }
+.clipboard-panel textarea { width: 100%; min-height: 44px; height: 64px; max-height: 120px; resize: vertical; }
 .icon-button { font-size: 24px; padding: 0 12px; background: transparent; }
 .keyboard-entry { display: none; flex-shrink: 0; align-items: center; gap: 8px; padding: 8px 16px; background: var(--surface); }
 .keyboard-entry.open { display: flex; }
@@ -121,12 +123,22 @@ h2 { margin: 0 0 12px; font-size: 26px; font-weight: 600; letter-spacing: -.035e
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 /* Fullscreen controls occupy a dedicated track, outside the input surface. */
 .app-shell.immersive { position: fixed; inset: 0; z-index: 10; width: 100%; height: var(--viewport-height,100dvh); background: #0b0f14; padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.immersive .stage { min-height: 64px; }
+.immersive .fullscreen-trigger { display: none; }
 .immersive .topbar, .immersive .gesture-help { display: none; }
-.view-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; flex-shrink: 0; gap: 8px; padding: max(4px,env(safe-area-inset-top)) 12px 4px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.view-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; flex-shrink: 0; gap: 6px; padding: max(2px,env(safe-area-inset-top)) 8px 2px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .view-controls span { margin-right: auto; color: var(--muted); font-size: 12px; }
 .view-notice { margin: 0; padding: 8px 12px; background: var(--surface); color: var(--muted); font-size: 12px; flex-shrink: 0; }
 .immersive.controls-hidden .toolbar, .immersive.controls-hidden .view-notice { display: none; }
-.immersive .toolbar, .immersive .keyboard-entry { padding-bottom: max(8px,env(safe-area-inset-bottom)); }
+.immersive .toolbar { padding: 4px 8px; }
+.immersive .toolbar > .toolbar-group { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: thin; padding: 4px; scroll-padding-inline: 4px; }
+.immersive .toolbar > .toolbar-group > button { flex: 0 0 auto; white-space: nowrap; min-height: 44px; padding: 8px 12px; }
+.immersive .toolbar .quality-trigger { flex: 0 0 auto; min-width: 140px; }
+.immersive .toolbar > .toolbar-group > button:focus-visible, .immersive .keys button:focus-visible { outline-offset: -3px; }
+.immersive .more-controls { max-height: min(240px,28vh); max-height: min(240px,calc(var(--viewport-height,100dvh) * .28)); overflow: auto; margin-top: 4px; padding: 4px; gap: 8px; }
+.immersive .keys { display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 4px; padding: 4px; }
+.immersive .keys button { flex: 0 0 44px; padding: 4px; }
+.immersive .keyboard-entry { padding: 4px 12px; }
 @media (max-width: 600px) {
   .topbar { padding-left: 16px; padding-right: 16px; gap: 12px; }
   .brand { width: 100%; }
@@ -138,6 +150,10 @@ h2 { margin: 0 0 12px; font-size: 26px; font-weight: 600; letter-spacing: -.035e
   .toolbar .quality-trigger { grid-column: span 2; min-width: 0; }
   .toolbar > .toolbar-group > button:last-child { margin-left: 0; }
   .toolbar button { min-width: 0; padding: 8px; white-space: normal; overflow-wrap: anywhere; }
+  .immersive .view-controls span { display: none; }
+  .immersive .view-controls { flex-wrap: nowrap; }
+  .immersive .view-controls button { padding: 8px; }
+  .immersive .toolbar > .toolbar-group > button:last-child { margin-left: 0; }
   .keys { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); width: 100%; gap: 4px; }
   .keys button { min-width: 0; padding: 4px; }
   .connect-card { padding: 8px; }
@@ -147,6 +163,8 @@ h2 { margin: 0 0 12px; font-size: 26px; font-weight: 600; letter-spacing: -.035e
   .quality-option { gap: 8px; }
   .card { padding: 24px; }
   .landing { padding: 16px; }
+  .clipboard-panel { padding: 8px; }
+  .clipboard-panel > button { max-width: 112px; }
 }
 @media (max-height: 500px) {
   .topbar { padding-top: 4px; padding-bottom: 4px; }
@@ -163,7 +181,7 @@ h2 { margin: 0 0 12px; font-size: 26px; font-weight: 600; letter-spacing: -.035e
   .quality-dialog { padding: 16px; }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .quality-dialog[open], .keyboard-entry.open, .view-controls { animation: surface-enter 180ms cubic-bezier(.16,1,.3,1); }
+  .quality-dialog[open], .keyboard-entry.open, .clipboard-panel, .more-controls:not([hidden]), .view-controls { animation: surface-enter 180ms cubic-bezier(.16,1,.3,1); }
   .quality-dialog[open] .quality-option { animation: surface-enter 200ms cubic-bezier(.16,1,.3,1) both; }
   .quality-option:nth-of-type(2) { animation-delay: 20ms !important; }
   .quality-option:nth-of-type(3) { animation-delay: 40ms !important; }

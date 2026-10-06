@@ -21,6 +21,7 @@ const modifierKeys = { Command: 0xffe7, Control: 0xffe3, Option: 0xffe9, Shift: 
 const specialKeys = { Escape: 0xff1b, Tab: 0xff09, Return: 0xff0d, Backspace: 0xff08, Delete: 0xffff, Left: 0xff51, Up: 0xff52, Right: 0xff53, Down: 0xff54 } as const;
 const videoSpecialCodes: Record<keyof typeof specialKeys, string> = { Escape: 'Escape', Tab: 'Tab', Return: 'Enter', Backspace: 'Backspace', Delete: 'Delete', Left: 'ArrowLeft', Up: 'ArrowUp', Right: 'ArrowRight', Down: 'ArrowDown' };
 const videoModifierCodes: Record<keyof typeof modifierKeys, string> = { Command: 'MetaLeft', Control: 'ControlLeft', Option: 'AltLeft', Shift: 'ShiftLeft' };
+const isFnKey = (event: React.KeyboardEvent) => event.key === 'Fn' || event.key === 'FnLock' || event.code === 'Fn' || event.code === 'FnLock';
 
 async function api(path: string, options?: RequestInit) {
   const response = await fetch(`/api/${path}`, { credentials: 'same-origin', cache: 'no-store', ...options });
@@ -51,6 +52,10 @@ function App() {
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null);
   const viewRequest = useRef(0);
   const [nativeVideo, setNativeVideo] = useState(true);
+  const [hostPlatform, setHostPlatform] = useState('');
+  const [fnArmed, setFnArmed] = useState(false);
+  const fnArmedRef = useRef(false);
+  const fnKeyCode = useRef<string | null>(null);
   const [hevcVideo, setHevcVideo] = useState(true);
   const [hevcCodecString, setHevcCodecString] = useState('hvc1.1.6.L150.B0');
   const [hevcMseVideo, setHevcMseVideo] = useState(false);
@@ -67,6 +72,9 @@ function App() {
   const qualityDialogRef = useRef<HTMLDialogElement>(null);
   const qualityButtonRef = useRef<HTMLButtonElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const controlsButtonRef = useRef<HTMLButtonElement>(null);
+  const clipboardButtonRef = useRef<HTMLButtonElement>(null);
+  const keyboardButtonRef = useRef<HTMLButtonElement>(null);
   const escapeHandled = useRef(false);
   useEffect(() => {
     if (qualityOpen) qualityDialogRef.current?.showModal();
@@ -88,6 +96,7 @@ function App() {
   const intentional = useRef(false);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryCount = useRef(0);
+  const connectedAt = useRef(0);
   const noRetry = useRef(false);
   const hevcFallbackReason = useRef('');
   const cachedCredentials = useRef<{ username: string; password: string } | null>(null);
@@ -108,6 +117,9 @@ function App() {
     window.addEventListener('resize', resize);
     return () => { viewport?.removeEventListener('resize', resize); window.removeEventListener('resize', resize); };
   }, []);
+  useEffect(() => {
+    if (viewMode !== 'normal') controlsButtonRef.current?.focus({ preventScroll: true });
+  }, [viewMode]);
 
   async function exitViewing() {
     ++viewRequest.current;
@@ -197,6 +209,10 @@ function App() {
   }, [authenticated, loading, mode, modifiers, status, mobileKeys]);
 
   useEffect(() => {
+    if (mode !== 'video' || status !== 'connected') { fnArmedRef.current = false; fnKeyCode.current = null; setFnArmed(false); }
+  }, [mode, status]);
+
+  useEffect(() => {
     if (status !== 'connected') { releaseVideoInput(); setMobileKeys(false); setClipboardOpen(false); }
   }, [status]);
 
@@ -204,6 +220,7 @@ function App() {
     api('session').then((result) => {
       setAuthenticated(result.authenticated);
       setConfigured(result.configured);
+      setHostPlatform(result.platform || '');
       const canStreamVideo = result.nativeVideo !== false;
       setNativeVideo(canStreamVideo);
       if (!canStreamVideo) setMode('vnc');
@@ -231,6 +248,7 @@ function App() {
     try {
       await api('login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
       const session = await api('session');
+      setHostPlatform(session.platform || '');
       const canStreamVideo = session.nativeVideo === true;
       setNativeVideo(canStreamVideo);
       if (!canStreamVideo) setMode('vnc');
@@ -264,6 +282,7 @@ function App() {
     if (!retrying) { retryCount.current = 0; noRetry.current = false; }
     if (retryTimer.current) clearTimeout(retryTimer.current);
     rfbRef.current?.disconnect();
+    connectedAt.current = 0;
     viewerRef.current.replaceChildren();
     setStatus('connecting');
     setMessage('Connecting to your VNC server…');
@@ -276,7 +295,7 @@ function App() {
     rfb.qualityLevel = lowQuality(qualityRef.current) ? 3 : qualityRef.current === 'high' || qualityRef.current === 'high15' ? 9 : 6;
     rfb.compressionLevel = lowQuality(qualityRef.current) ? 7 : qualityRef.current === 'high' || qualityRef.current === 'high15' ? 2 : 4;
     rfb.background = '#111827';
-    rfb.addEventListener('connect', () => { retryCount.current = 0; setStatus('connected'); setMessage(''); rfb.focus(); });
+    rfb.addEventListener('connect', () => { if (rfbRef.current !== rfb) return; connectedAt.current = Date.now(); setStatus('connected'); setMessage(''); rfb.focus(); });
     rfb.addEventListener('credentialsrequired', (event) => {
       const types = (event as CustomEvent<{ types: string[] }>).detail.types;
       if (cachedCredentials.current) {
@@ -300,6 +319,8 @@ function App() {
       rfbRef.current = null;
       setCredentials(null);
       if (!intentional.current) {
+        if (connectedAt.current && Date.now() - connectedAt.current >= 30_000) retryCount.current = 0;
+        connectedAt.current = 0;
         setStatus('disconnected');
         const clean = (event as CustomEvent<{ clean: boolean }>).detail.clean;
         setMessage((previous) => previous && !clean ? previous : 'Connection ended. Check that the VNC server is running, then reconnect.');
@@ -319,13 +340,14 @@ function App() {
     if (retryTimer.current) clearTimeout(retryTimer.current);
     releaseVideoInput();
     videoRef.current?.close();
+    connectedAt.current = 0;
     setVideoPlayback(typeof VideoDecoder === 'undefined' ? 'mse' : 'canvas');
     setStatus('connecting');
     setActiveCodec('');
     setMessage('Starting the video stream…');
     const client = new VideoClient(canvasRef.current, (codec) => {
       if (videoRef.current !== client) return;
-      retryCount.current = 0;
+      connectedAt.current = Date.now();
       setVideoPlayback(client.renderMode);
       setActiveCodec(codec === 'hevc' ? 'HEVC' : 'H.264');
       setStatus('connected');
@@ -338,7 +360,7 @@ function App() {
         if (hevcMseVideo) hevcFallbackReason.current = error;
         client.close();
         videoRef.current = null;
-        connectVideo(selectedQuality, false, 'h264');
+        connectVideo(selectedQuality, retrying, 'h264');
         return;
       }
       noRetry.current = true;
@@ -350,6 +372,9 @@ function App() {
       if (videoRef.current !== client || intentional.current) return;
       client.close();
       videoRef.current = null;
+      // First frames do not prove stability: short-lived connections keep their retry budget.
+      if (connectedAt.current && Date.now() - connectedAt.current >= 30_000) retryCount.current = 0;
+      connectedAt.current = 0;
       setStatus('disconnected');
       if (code === 4000 || code === 4001) {
         noRetry.current = true;
@@ -419,12 +444,26 @@ function App() {
     setMessage('Authenticating with the VNC server…');
   }
 
+  function clearFn() {
+    fnArmedRef.current = false;
+    setFnArmed(false);
+  }
+  function toggleFn() {
+    if (fnArmedRef.current) clearFn();
+    else { fnArmedRef.current = true; setFnArmed(true); }
+  }
+  function consumeFn() {
+    const active = fnArmedRef.current && mode === 'video' && hostPlatform === 'darwin';
+    if (active) clearFn();
+    return active;
+  }
   function sendKey(name: keyof typeof specialKeys, focusDesktop = true) {
     if (status !== 'connected') return;
     if (mode === 'video') {
+      const fn = consumeFn();
       for (const modifier of modifiers) videoRef.current?.sendInput({ type: 'key', code: videoModifierCodes[modifier as keyof typeof modifierKeys], down: true });
-      videoRef.current?.sendInput({ type: 'key', code: videoSpecialCodes[name], down: true });
-      videoRef.current?.sendInput({ type: 'key', code: videoSpecialCodes[name], down: false });
+      videoRef.current?.sendInput({ type: 'key', code: videoSpecialCodes[name], down: true, ...(fn ? { fn: true } : {}) });
+      videoRef.current?.sendInput({ type: 'key', code: videoSpecialCodes[name], down: false, ...(fn ? { fn: true } : {}) });
       for (const modifier of [...modifiers].reverse()) videoRef.current?.sendInput({ type: 'key', code: videoModifierCodes[modifier as keyof typeof modifierKeys], down: false });
       setModifiers([]);
       if (focusDesktop && !mobileKeys) (videoPlayback === 'mse' ? mediaRef.current : canvasRef.current)?.focus({ preventScroll: true });
@@ -443,13 +482,15 @@ function App() {
     if (status !== 'connected') return;
     if (mode === 'video') {
       const code = /^[a-z]$/i.test(character) ? `Key${character.toUpperCase()}` : /^[0-9]$/.test(character) ? `Digit${character}` : null;
-      if (modifiers.length && code) {
+      if ((modifiers.length || fnArmedRef.current) && code) {
+        const fn = consumeFn();
         for (const modifier of modifiers) videoRef.current?.sendInput({ type: 'key', code: videoModifierCodes[modifier as keyof typeof modifierKeys], down: true });
-        videoRef.current?.sendInput({ type: 'key', code, down: true });
-        videoRef.current?.sendInput({ type: 'key', code, down: false });
+        videoRef.current?.sendInput({ type: 'key', code, down: true, ...(fn ? { fn: true } : {}) });
+        videoRef.current?.sendInput({ type: 'key', code, down: false, ...(fn ? { fn: true } : {}) });
         for (const modifier of [...modifiers].reverse()) videoRef.current?.sendInput({ type: 'key', code: videoModifierCodes[modifier as keyof typeof modifierKeys], down: false });
         setModifiers([]);
       } else {
+        if (fnArmedRef.current) clearFn(); // IME commits must not leave Fn armed for a later f.
         videoRef.current?.sendInput({ type: 'text', text: character });
         if (modifiers.length) setModifiers([]);
       }
@@ -563,7 +604,8 @@ function App() {
     }
   }
   function releaseVideoInput() {
-    for (const code of pressedKeys.current) videoRef.current?.sendInput({ type: 'key', code, down: false });
+    for (const code of pressedKeys.current) videoRef.current?.sendInput({ type: 'key', code, down: false, ...(code === fnKeyCode.current ? { fn: true } : {}) });
+    fnKeyCode.current = null;
     pressedKeys.current.clear();
     for (const button of pressedButtons.current) videoRef.current?.sendInput({ type: 'button', button, down: false });
     pressedButtons.current.clear();
@@ -573,16 +615,29 @@ function App() {
   }
 
   function videoKey(event: React.KeyboardEvent<HTMLCanvasElement | HTMLVideoElement>, down: boolean) {
+    if (isFnKey(event)) { event.preventDefault(); return; }
+    if (event.nativeEvent?.isComposing || event.keyCode === 229 || event.key === 'Process' || event.key === 'Dead') {
+      event.preventDefault();
+      if (fnArmedRef.current) clearFn();
+      if (!down && pressedKeys.current.has(event.code)) {
+        pressedKeys.current.delete(event.code);
+        videoRef.current?.sendInput({ type: 'key', code: event.code, down: false, ...(fnKeyCode.current === event.code ? { fn: true } : {}) });
+        if (fnKeyCode.current === event.code) fnKeyCode.current = null;
+      }
+      return;
+    }
     if (status !== 'connected') return;
     if (viewMode !== 'normal' && event.key === 'Tab') return; // Remote Tab remains available in the toolbar.
     event.preventDefault();
     if (down) {
       if (pressedKeys.current.has(event.code)) return;
       pressedKeys.current.add(event.code);
+      if (consumeFn()) fnKeyCode.current = event.code;
     } else {
       pressedKeys.current.delete(event.code);
     }
-    videoRef.current?.sendInput({ type: 'key', code: event.code, down });
+    videoRef.current?.sendInput({ type: 'key', code: event.code, down, ...(fnKeyCode.current === event.code ? { fn: true } : {}) });
+    if (!down && fnKeyCode.current === event.code) fnKeyCode.current = null;
   }
 
   if (loading) return <main className="landing"><div className="card loading-card" role="status"><span className="loading-indicator" />Opening Remote Control…</div></main>;
@@ -594,12 +649,12 @@ function App() {
     {authError && <p className="error" role="alert">{authError}</p>}
     <p className="login-safety">Use HTTPS or a trusted VPN. Keep port 8787 private.</p>
   </section></main>;
-  return <main ref={shellRef} className={`app-shell ${viewMode !== 'normal' ? 'immersive' : ''} ${controlsHidden && !mobileKeys && !clipboardOpen && status === 'connected' ? 'controls-hidden' : ''} ${videoFill ? 'video-fill' : ''}`}
+  return <main ref={shellRef} className={`app-shell ${viewMode !== 'normal' ? 'immersive' : ''} ${controlsHidden ? 'controls-hidden' : ''} ${videoFill ? 'video-fill' : ''}`}
     onKeyDownCapture={(event) => {
       if (event.key !== 'Escape') return;
       if (qualityOpen) setQualityOpen(false);
-      else if (clipboardOpen) setClipboardOpen(false);
-      else if (mobileKeys) { inputRef.current?.blur(); setMobileKeys(false); }
+      else if (clipboardOpen) { setClipboardOpen(false); clipboardButtonRef.current?.focus({ preventScroll: true }); }
+      else if (mobileKeys) { inputRef.current?.blur(); setMobileKeys(false); keyboardButtonRef.current?.focus({ preventScroll: true }); }
       else if (moreOpen) { setMoreOpen(false); moreButtonRef.current?.focus(); }
       else if (viewMode !== 'normal') void exitViewing();
       else return;
@@ -609,8 +664,7 @@ function App() {
     onKeyUpCapture={(event) => { if (event.key === 'Escape' && escapeHandled.current) { escapeHandled.current = false; event.preventDefault(); event.stopPropagation(); } }}>
     {viewMode !== 'normal' && <div className="view-controls" aria-label="Viewing controls">
       <span role="status">{viewMode === 'theater' ? 'Theater' : 'Fullscreen'} · Keyboard {mobileKeys ? 'open' : 'closed'}</span>
-      <button aria-expanded={!controlsHidden || mobileKeys || clipboardOpen} disabled={mobileKeys || clipboardOpen || status !== 'connected'} onClick={() => { releaseVideoInput(); setControlsHidden(!controlsHidden); }}>{controlsHidden ? 'Show controls' : 'Hide controls'}</button>
-      <button disabled={status === 'idle'} onClick={disconnect}>Disconnect</button>
+      <button ref={controlsButtonRef} aria-controls="remote-controls" aria-expanded={!controlsHidden} onClick={() => { releaseVideoInput(); if (!controlsHidden) { setMoreOpen(false); setClipboardOpen(false); inputRef.current?.blur(); setMobileKeys(false); } setControlsHidden(!controlsHidden); }}> {controlsHidden ? 'Show controls' : 'Hide controls'}</button>
       <button onClick={() => void exitViewing()}>Exit · Esc</button>
     </div>}
     {viewNotice && <p className="view-notice" role="status">{viewNotice}</p>}
@@ -642,28 +696,30 @@ function App() {
       </div>
       {status !== 'connected' && <div className="stage-overlay"><div className={`connect-card ${status === 'connecting' ? 'is-connecting' : ''}`}><div className="desktop-icon" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><rect x="5" y="7" width="38" height="27" rx="4" /><path d="M17 41h14M24 34v7M12 27h24" /></svg></div><p className="eyebrow">{status === 'connecting' ? 'ESTABLISHING SESSION' : status === 'disconnected' ? 'SESSION PAUSED' : 'YOUR WORKSPACE AWAITS'}</p><h2>{status === 'connecting' ? 'Getting you connected' : status === 'disconnected' ? 'Connection ended' : 'Right where you left off.'}</h2><p role="status">{message || 'Your computer, in this browser. Connect when you’re ready to pick things up.'}</p><div className="session-summary"><span>{mode === 'video' ? 'Video stream' : 'VNC fallback'}</span><span>{qualityPresets.find((preset) => preset.value === quality)?.label}</span></div>{status !== 'connecting' && <button className="primary" onClick={connect}>{status === 'disconnected' ? 'Reconnect to desktop' : 'Connect to desktop'}<span aria-hidden="true"> →</span></button>}{nativeVideo && status !== 'connecting' && <button className="fallback-link" onClick={() => switchMode(mode === 'video' ? 'vnc' : 'video')}>{mode === 'video' ? 'Use VNC fallback' : 'Use video stream'}</button>}<p className="connection-safety">Private access · Use HTTPS or a trusted VPN</p></div></div>}
       {credentials && <div className="modal-backdrop"><form className="modal" onSubmit={submitCredentials}><h2>VNC server authentication</h2><p>Enter the credentials configured on your VNC server. Kept only in this page's memory for reconnection, not saved to disk.</p>{credentials.needsUsername && <><label htmlFor="vnc-username">VNC username</label><input id="vnc-username" autoComplete="username" value={credentials.username} onChange={(event) => setCredentials({ ...credentials, username: event.target.value })} required /></>}<label htmlFor="vnc-password">VNC password</label><input id="vnc-password" type="password" autoComplete="off" value={credentials.password} onChange={(event) => setCredentials({ ...credentials, password: event.target.value })} required autoFocus /><button className="primary" type="submit">Continue</button></form></div>}
-      {clipboardOpen && <div className="clipboard-panel"><div className="panel-heading"><strong>Send text</strong><button className="icon-button" onClick={() => setClipboardOpen(false)} aria-label="Close clipboard">×</button></div><textarea value={clipboard} onChange={(event) => setClipboard(event.target.value)} placeholder="Paste text here" /><button onClick={() => { if (mode === 'video') void videoRef.current?.sendText(clipboard); else rfbRef.current?.clipboardPasteFrom(clipboard); setClipboardOpen(false); }}>Send to desktop</button></div>}
     </section>
-    <nav className="toolbar" aria-label="Remote controls">
+    {clipboardOpen && <section className="clipboard-panel" aria-labelledby="clipboard-title"><div className="panel-heading"><strong id="clipboard-title">Send text</strong><button className="icon-button" onClick={() => { setClipboardOpen(false); clipboardButtonRef.current?.focus({ preventScroll: true }); }} aria-label="Close clipboard">×</button></div><textarea aria-label="Text to send to desktop" autoFocus value={clipboard} onChange={(event) => setClipboard(event.target.value)} placeholder="Paste text here" /><button disabled={status !== 'connected' || !clipboard.trim()} onClick={() => { if (mode === 'video') void videoRef.current?.sendText(clipboard); else rfbRef.current?.clipboardPasteFrom(clipboard); setClipboardOpen(false); clipboardButtonRef.current?.focus({ preventScroll: true }); }}>Send to desktop</button></section>}
+    <nav id="remote-controls" className="toolbar" aria-label="Remote controls">
       <div className="toolbar-group">
         <button className="quality-trigger" ref={qualityButtonRef} aria-haspopup="dialog" onClick={() => { releaseVideoInput(); setDraftQuality(quality); setQualityOpen(true); }}><span className="control-caption">Quality</span><span>{qualityPresets.find((preset) => preset.value === quality)?.label}</span><span className="control-chevron" aria-hidden="true">⌃</span></button>
         {mode === 'video' && <>
-          <button ref={fullscreenButtonRef} disabled={viewPending} aria-pressed={viewMode !== 'normal'} onClick={() => void (viewMode === 'normal' ? enterViewing() : exitViewing())}>{viewPending ? 'Opening…' : viewMode === 'normal' ? 'Fullscreen' : 'Exit view'}</button>
+          <button className="fullscreen-trigger" ref={fullscreenButtonRef} disabled={viewPending} aria-pressed={viewMode !== 'normal'} onClick={() => void (viewMode === 'normal' ? enterViewing() : exitViewing())}>{viewPending ? 'Opening…' : viewMode === 'normal' ? 'Fullscreen' : 'Exit view'}</button>
         </>}
-        <button disabled={status !== 'connected'} aria-expanded={clipboardOpen} onClick={() => setClipboardOpen(!clipboardOpen)}>Text</button>
-        <button className="mobile-keyboard" disabled={status !== 'connected'} aria-expanded={mobileKeys} onClick={() => { flushSync(() => setMobileKeys(true)); inputRef.current?.focus({ preventScroll: true }); }}>Keyboard</button>
+        <button ref={clipboardButtonRef} disabled={status !== 'connected'} aria-expanded={clipboardOpen} onClick={() => { clearFn(); setMobileKeys(false); setMoreOpen(false); setClipboardOpen(!clipboardOpen); }}>Text</button>
+        <button ref={keyboardButtonRef} className="mobile-keyboard" disabled={status !== 'connected'} aria-expanded={mobileKeys} onClick={() => { clearFn(); flushSync(() => { setClipboardOpen(false); setMoreOpen(false); setMobileKeys(true); }); inputRef.current?.focus({ preventScroll: true }); }}>Keyboard</button>
         <button ref={moreButtonRef} aria-expanded={moreOpen} aria-controls="more-controls" onClick={() => setMoreOpen(!moreOpen)}>More {moreOpen ? '−' : '+'}</button>
       </div>
       <div id="more-controls" className="more-controls" hidden={!moreOpen && !mobileKeys}>
       <div className="toolbar-group secondary-controls" hidden={!moreOpen}>
         {mode === 'vnc' ? <button onClick={() => { setFit(!fit); if (rfbRef.current) rfbRef.current.scaleViewport = !fit; }}>{fit ? 'Actual size' : 'Fit screen'}</button> : <label className="quality-label">View <select aria-label="Video sizing" value={videoFill ? 'fill' : 'fit'} onChange={(event) => { releaseVideoInput(); setVideoFill(event.target.value === 'fill'); }}><option value="fit">Fit — full frame</option><option value="fill">Fill — crop</option></select></label>}
         {nativeVideo && <button onClick={() => switchMode(mode === 'video' ? 'vnc' : 'video')}>{mode === 'video' ? 'Use VNC fallback' : 'Use video stream'}</button>}
+        {viewMode !== 'normal' && <button disabled={status === 'idle'} onClick={disconnect}>Disconnect</button>}
         <button onClick={signOut}>Sign out</button>
         <span className="audio-note">No audio is transmitted</span>
         <span className="transport-note">{location.protocol === 'https:' ? 'HTTPS connection' : 'HTTP connection — use a trusted VPN or switch to HTTPS.'} Keep port 8787 private.</span>
       </div>
       <div className="toolbar-group keys" aria-label="Remote keys">
-        {Object.keys(modifierKeys).map((name) => <button disabled={status !== 'connected'} aria-label={name === 'Command' && !nativeVideo ? 'Windows' : name} aria-pressed={modifiers.includes(name)} className={modifiers.includes(name) ? 'selected' : ''} onClick={() => toggleModifier(name)} key={name}>{name === 'Command' ? nativeVideo ? '⌘' : 'Win' : name === 'Option' ? '⌥' : name === 'Control' ? '⌃' : '⇧'}</button>)}
+        {mode === 'video' && hostPlatform === 'darwin' && <button disabled={status !== 'connected'} aria-label="Fn (next key)" aria-pressed={fnArmed} className={fnArmed ? 'selected' : ''} onPointerDown={(event) => { if (mobileKeys) event.preventDefault(); }} onClick={() => { toggleFn(); if (!mobileKeys) (videoPlayback === 'mse' ? mediaRef.current : canvasRef.current)?.focus({ preventScroll: true }); }}>Fn</button>}
+        {Object.keys(modifierKeys).map((name) => <button disabled={status !== 'connected'} aria-label={name === 'Command' && !nativeVideo ? 'Windows' : name} aria-pressed={modifiers.includes(name)} className={modifiers.includes(name) ? 'selected' : ''} onPointerDown={(event) => { if (mobileKeys) event.preventDefault(); }} onClick={() => toggleModifier(name)} key={name}>{name === 'Command' ? nativeVideo ? '⌘' : 'Win' : name === 'Option' ? '⌥' : name === 'Control' ? '⌃' : '⇧'}</button>)}
         {(['Escape', 'Tab', 'Return', 'Backspace'] as const).map((name) => <button disabled={status !== 'connected'} aria-label={name} onPointerDown={(event) => { if (mobileKeys) event.preventDefault(); }} onClick={() => sendKey(name)} key={name}>{name === 'Escape' ? 'Esc' : name === 'Return' ? '↵' : name === 'Backspace' ? '⌫' : 'Tab'}</button>)}
       </div>
       </div>
@@ -687,11 +743,11 @@ function App() {
     <div className={`keyboard-entry ${mobileKeys ? 'open' : ''}`}>
       <label htmlFor="remote-input">Type on remote desktop</label>
       <input id="remote-input" ref={inputRef} className="mobile-input" disabled={status !== 'connected'} tabIndex={mobileKeys ? 0 : -1} aria-label="Type on remote desktop" placeholder="Type here…" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
-        onCompositionStart={() => { composing.current = true; }}
-        onCompositionEnd={(event) => { composing.current = false; for (const char of event.currentTarget.value) sendCharacter(char); event.currentTarget.value = ''; }}
+        onCompositionStart={() => { composing.current = true; clearFn(); }}
+        onCompositionEnd={(event) => { composing.current = false; clearFn(); for (const char of event.currentTarget.value) sendCharacter(char); event.currentTarget.value = ''; }}
         onInput={(event) => { if (composing.current || (event.nativeEvent as InputEvent).isComposing) return; for (const char of event.currentTarget.value) sendCharacter(char); event.currentTarget.value = ''; }}
         onKeyDown={(event) => { if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return; if (event.key === 'Backspace' || event.key === 'Enter') { event.preventDefault(); sendKey(event.key === 'Backspace' ? 'Backspace' : 'Return', false); } }} />
-      <button onClick={() => { inputRef.current?.blur(); setMobileKeys(false); }}>Done</button>
+      <button onClick={() => { inputRef.current?.blur(); setMobileKeys(false); keyboardButtonRef.current?.focus({ preventScroll: true }); }}>Done</button>
     </div>
     <p className="gesture-help">{mode === 'video' ? 'Touch: tap to click · slide to drag · two fingers to scroll · two-finger tap to right-click' : 'Touch: tap to click · long press to drag · two fingers to scroll / right-click'}</p>
   </main>;

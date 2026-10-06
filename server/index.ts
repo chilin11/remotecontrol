@@ -7,7 +7,7 @@ import { verify } from '@node-rs/argon2';
 import WebSocket, { WebSocketServer, createWebSocketStream } from 'ws';
 import { hasOwner, ownerHash, createSession, validSession, revokeSession } from './store.js';
 import { gatewayHost, hostPlatform, nativeVideoAvailable, port, vncHost, vncPort } from './config.js';
-import { attachVideo } from './video.js';
+import { attachVideo, stopAllCapture } from './video.js';
 
 const staticRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
 const server = http.createServer((req, res) => {
@@ -73,7 +73,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const pathname = new URL(req.url || '/', 'http://localhost').pathname;
   if (pathname.startsWith('/api/')) {
     if (pathname === '/api/session' && req.method === 'GET') {
-      json(res, 200, { authenticated: validSession(cookie(req), true), configured: hasOwner(), controlling: !!controller || !!videoController, nativeVideo: nativeVideoAvailable, hevcVideo: nativeVideoAvailable && (hostPlatform === 'darwin' || hostPlatform === 'win32'), hevcCodecString: hostPlatform === 'win32' ? 'hvc1.1.6.L150.90' : 'hvc1.1.6.L150.B0', hevcMseVideo: hostPlatform === 'win32' });
+      json(res, 200, { authenticated: validSession(cookie(req), true), configured: hasOwner(), controlling: !!controller || !!videoController, platform: hostPlatform, nativeVideo: nativeVideoAvailable, hevcVideo: nativeVideoAvailable && (hostPlatform === 'darwin' || hostPlatform === 'win32'), hevcCodecString: hostPlatform === 'win32' ? 'hvc1.1.6.L150.90' : 'hvc1.1.6.L150.B0', hevcMseVideo: hostPlatform === 'win32' });
       return;
     }
     if (req.method !== 'POST' || !sameOrigin(req)) { json(res, 403, { error: 'Forbidden' }); return; }
@@ -176,3 +176,21 @@ server.listen(port, gatewayHost, () => {
   if (gatewayHost === '0.0.0.0') console.warn('LAN HTTP is unencrypted. Use only on a trusted private network; use HTTPS or a trusted VPN on public networks.');
   if (!hasOwner()) console.log('Run `pnpm setup` before signing in.');
 });
+
+// The desktop host owns this process; shutting it down must stop native capture too.
+let shuttingDown = false;
+async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  for (const ws of [...wss.clients, ...videoWss.clients]) ws.terminate();
+  controller?.tcp.destroy();
+  await stopAllCapture();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 300).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+if (process.env.REMOTECONTROL_DESKTOP_GATEWAY === '1') {
+  process.stdin.resume();
+  process.stdin.on('end', () => { void shutdown(); });
+}

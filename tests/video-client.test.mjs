@@ -216,3 +216,60 @@ test('Windows HEVC codec string is negotiated and accepted by WebCodecs', async 
   assert.equal(FakeVideoDecoder.instances[0].configurations[0].codec, 'hvc1.1.6.L150.90');
   client.close();
 });
+
+test('video traffic prevents false heartbeat timeouts, but a silent connection still closes', async (t) => {
+  installBrowserMocks(t);
+  t.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: 1000 });
+  const closed = [];
+  const client = new VideoClient(canvas(), () => {}, (message) => assert.fail(message), (code) => closed.push(code));
+  t.after(() => client.close());
+  await client.connect('balanced');
+  const ws = FakeWebSocket.latest;
+  ws.onopen();
+  ws.onmessage({ data: JSON.stringify({ type: 'stream', codec: 'hevc', codecString: 'hvc1.1.6.L150.B0', width: 1280, height: 720 }) });
+  const decoder = FakeVideoDecoder.instances[0];
+  decoder.callbacks.output({ close() {} });
+  for (let i = 0; i < 8; i++) {
+    ws.onmessage({ data: packet(true) });
+    t.mock.timers.tick(15_000);
+  }
+  assert.equal(ws.readyState, FakeWebSocket.OPEN, 'video traffic is sufficient without a pong');
+  assert.deepEqual(closed, []);
+  for (let i = 0; i < 4; i++) t.mock.timers.tick(15_000);
+  assert.equal(ws.readyState, 3);
+  assert.deepEqual(closed, [1006]);
+});
+
+test('closed clients ignore late frames and cannot become ready again', async (t) => {
+  installBrowserMocks(t);
+  let ready = 0;
+  const client = new VideoClient(canvas(), () => ready++, (message) => assert.fail(message), () => {});
+  await client.connect('balanced');
+  const ws = FakeWebSocket.latest;
+  ws.onmessage({ data: JSON.stringify({ type: 'stream', codec: 'hevc', codecString: 'hvc1.1.6.L150.B0', width: 640, height: 480 }) });
+  const decoder = FakeVideoDecoder.instances[0];
+  client.close();
+  ws.onmessage({ data: packet(true) });
+  decoder.callbacks.output({ close() {} });
+  assert.equal(decoder.chunks.length, 0);
+  assert.equal(ready, 0);
+});
+
+test('background timer suspension gets one fresh probe, not unlimited timeout grace', async (t) => {
+  installBrowserMocks(t);
+  t.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: 1000 });
+  const closed = [];
+  const client = new VideoClient(canvas(), () => {}, (message) => assert.fail(message), (code) => closed.push(code));
+  t.after(() => client.close());
+  await client.connect('balanced');
+  const ws = FakeWebSocket.latest;
+  ws.onopen();
+  ws.onmessage({ data: JSON.stringify({ type: 'stream', codec: 'hevc', codecString: 'hvc1.1.6.L150.B0', width: 640, height: 480 }) });
+  FakeVideoDecoder.instances[0].callbacks.output({ close() {} });
+  t.mock.timers.tick(90_000);
+  assert.equal(ws.readyState, FakeWebSocket.OPEN, 'allow a fresh probe after suspension');
+  assert.equal(JSON.parse(ws.sent.at(-1)).type, 'ping');
+  t.mock.timers.tick(60_000);
+  assert.equal(ws.readyState, 3, 'without new data, a later delayed tick must not extend grace');
+  assert.deepEqual(closed, [1006]);
+});

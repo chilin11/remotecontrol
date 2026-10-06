@@ -55,8 +55,24 @@ internal sealed record QualityPreset(string Codec, string Name, int MaxWidth, in
 internal static class Program
 {
     [STAThread]
-    private static async Task<int> Main(string[] args)
+    private static int Main(string[] args)
     {
+        if (args.Length == 3 && args[0] == "--install-ffmpeg")
+        {
+            try
+            {
+                string executable = FfmpegInstaller.EnsureAsync(Path.GetFullPath(args[1]), null, CancellationToken.None).GetAwaiter().GetResult();
+                File.WriteAllText(args[2], JsonSerializer.Serialize(new { executable }));
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(args[2], JsonSerializer.Serialize(new { error = ex.Message }));
+                return 1;
+            }
+        }
+        if (args.Length == 0 || (args.Length == 1 && args[0] is "--desktop" or "--background"))
+            return DesktopHost.Run(args.Length == 1 && args[0] == "--background");
         try
         {
             var preset = QualityPreset.Parse(args);
@@ -77,7 +93,7 @@ internal static class Program
                 preset = preset with { Fps = limits.Fps };
             }
             var writer = new PacketWriter();
-            return await Agent.RunAsync(writer, preset, screen, width, height);
+            return Agent.RunAsync(writer, preset, screen, width, height).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {

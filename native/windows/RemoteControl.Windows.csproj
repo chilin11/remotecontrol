@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>RemoteControlAgent</AssemblyName>
+    <ApplicationIcon>../assets/RemoteControl.ico</ApplicationIcon>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -8,4 +10,7 @@
     <Nullable>enable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="ffmpeg-distribution.json" LogicalName="RemoteControl.FfmpegDistribution" />
+  </ItemGroup>
 </Project>

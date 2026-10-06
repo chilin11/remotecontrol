@@ -24,6 +24,7 @@ export class VideoClient {
   private mediaErrorHandler?: () => void;
   private heartbeat?: ReturnType<typeof setInterval>;
   private lastPong = Date.now();
+  private lastReceived = Date.now();
   private lastHeartbeatTick = Date.now();
   private resumeProbeAt = 0;
   private inputQueue: Array<{ kind: 'input'; value: Record<string, unknown> } | { kind: 'text'; value: string; done: () => void }> = [];
@@ -81,6 +82,7 @@ export class VideoClient {
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
       this.lastPong = Date.now();
+      this.lastReceived = this.lastPong;
       this.lastHeartbeatTick = this.lastPong;
       ws.send(JSON.stringify({ type: 'start', codec: choice!.codec, quality, ...(this.playback === 'mse' ? { format: 'mse' } : {}) }));
       this.startupTimer = setTimeout(() => {
@@ -92,11 +94,14 @@ export class VideoClient {
         // A delayed background timer gets one fresh probe, not repeated grace without pong.
         if (now - this.lastHeartbeatTick > 30_000 && this.lastPong >= this.resumeProbeAt) this.resumeProbeAt = now;
         this.lastHeartbeatTick = now;
-        if (now - Math.max(this.lastPong, this.resumeProbeAt) > 45_000) { this.close(); this.onClose(1006); return; }
+        // Video traffic also proves liveness when pong is delayed behind queued frames.
+        if (now - Math.max(this.lastReceived, this.resumeProbeAt) > 45_000) { this.close(); this.onClose(1006); return; }
         ws.send(JSON.stringify({ type: 'ping' }));
       }, 15_000);
     };
     ws.onmessage = (event) => {
+      if (this.stopped) return;
+      this.lastReceived = Date.now();
       if (typeof event.data === 'string') {
         try {
           const message = JSON.parse(event.data) as { type: string; message?: string } & Partial<StreamInfo>;
@@ -236,7 +241,7 @@ export class VideoClient {
   }
 
   private markReady(): void {
-    if (!this.ready && this.codec) {
+    if (!this.stopped && !this.ready && this.codec) {
       this.ready = true;
       if (this.startupTimer) { clearTimeout(this.startupTimer); this.startupTimer = undefined; }
       this.onReady(this.codec);

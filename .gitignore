@@ -6,3 +6,4 @@ dist-native/
 *.db
 *.db-shm
 *.db-wal
+release/

@@ -1,6 +1,6 @@
 # Windows screen-stream agent
 
-This is a .NET 8 Windows console executable that captures the Windows virtual desktop with FFmpeg `gdigrab`, encodes low-latency H.264 (`libx264`) or HEVC (`libx265`), and sends the remote-control binary packet protocol on stdout. It is intentionally limited to video and input: no audio or file transfer.
+This .NET 8 Windows GUI-subsystem executable serves two roles: no arguments / `--desktop` opens the tray-enabled desktop host; `--background` starts it hidden at login. Explicit codec/quality arguments run the capture agent, using redirected stdin/stdout without a console window. FFmpeg `gdigrab` captures the virtual desktop; `libx264` / `libx265` encode low-latency H.264 / HEVC. No audio or file transfer.
 
 ## Prerequisites
 
@@ -11,9 +11,9 @@ This is a .NET 8 Windows console executable that captures the Windows virtual de
 
 ## Build and publish
 
-From the repository root, use `powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\windows.ps1` for the supported build + first-run setup + local start. The script validates FFmpeg and publishes a self-contained `dist-native/windows/RemoteControlAgent.exe`. For a manual framework-dependent build from this directory:
+The recommended distribution is `pnpm package:windows`: it automatically downloads and installs pinned FFmpeg if not cached, verifies SHA-256, preserves upstream license/build notices, validates capture/encoder support, and bundles it. `REMOTECONTROL_FFMPEG_DIR` is an optional advanced override, not a prerequisite. It produces `release/RemoteControl-windows-x64.zip`, containing the native host, Node, dependencies, website and FFmpeg. Extract fully and double-click `RemoteControl.exe`; the target needs no SDK/runtime installation. If bundled FFmpeg is missing, the desktop host automatically downloads it to the current user's data directory without UAC or PATH changes; failures can be retried with the repair button. See root `WINDOWS-DEPLOY.md`.
 
-The prebuilt `remotecontrol-windows-deploy.zip` includes the self-contained Windows x64 agent and built web gateway. Extract it and double-click `Start-Windows.cmd`; only Node.js 24+ and FFmpeg are required on the target. See the root `WINDOWS-DEPLOY.md`. The `-Prebuilt` PowerShell mode installs production dependencies and skips compilation.
+The desktop host preserves existing passwords/sessions, checks readiness automatically, and starts a configured gateway. Optional HKCU Run startup is per-user after login, not a Windows service. Closing the window hides to the tray; explicit tray exit shuts down the process tree. LAN consent persists; only firewall setup requests elevation. Legacy `Start-Windows.cmd` / `scripts/windows.ps1` remain foreground developer/compatibility entries, not the tray deployment. Manual agent build:
 
 ```powershell
 dotnet publish .\RemoteControl.Windows.csproj -c Release -r win-x64 --self-contained false -o .\publish

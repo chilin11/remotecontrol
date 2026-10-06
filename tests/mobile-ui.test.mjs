@@ -5,7 +5,7 @@ import { transformSync } from 'esbuild';
 
 // Exercise the real UI handlers without a gateway, native agent, or browser socket.
 const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
-const handlers = source.slice(source.indexOf('  function videoPoint('), source.indexOf('  function videoKey('));
+const handlers = source.slice(source.indexOf('const isFnKey ='), source.indexOf('\n\nasync function api(')) + '\n' + source.slice(source.indexOf('  function clearFn('), source.indexOf('  function sendKey(')) + source.slice(source.indexOf('  function sendCharacter('), source.indexOf('  function toggleModifier(')) + source.slice(source.indexOf('  function videoPoint('), source.indexOf('  if (loading) return'));
 function fixture(videoFill = false) {
   const sent = [];
   const refs = {
@@ -13,12 +13,14 @@ function fixture(videoFill = false) {
     touches: { current: new Map() },
     gesture: { current: { multi: false, moved: false, started: 0 } },
     pressedKeys: { current: new Set() },
+    fnKeyCode: { current: null },
+    fnArmedRef: { current: false },
     pressedButtons: { current: new Set() },
     pointerStartedHere: { current: false },
   };
   class Video {}
   const code = transformSync(handlers, { loader: 'ts', format: 'cjs' }).code;
-  const api = new Function(...Object.keys(refs), 'HTMLVideoElement', 'setModifiers', 'mode', 'status', 'videoFill', 'mobileKeys', `${code}; return { pointerDown, pointerMove, pointerUp, releaseVideoInput, videoPoint };`)(...Object.values(refs), Video, () => {}, 'video', 'connected', videoFill, false);
+  const api = new Function(...Object.keys(refs), 'HTMLVideoElement', 'setModifiers', 'setFnArmed', 'modifiers', 'mode', 'status', 'videoFill', 'mobileKeys', 'viewMode', 'hostPlatform', 'videoModifierCodes', `${code}; return { pointerDown, pointerMove, pointerUp, releaseVideoInput, videoPoint, videoKey, toggleFn, sendCharacter };`)(...Object.values(refs), Video, () => {}, () => {}, [], 'video', 'connected', videoFill, false, 'normal', 'darwin', {});
   const captures = new Set();
   const target = { width: 1920, height: 1080, focus() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 320, height: 240 }), setPointerCapture: id => captures.add(id), hasPointerCapture: id => captures.has(id), releasePointerCapture: id => captures.delete(id) };
   const event = (id, x, y, pointerType = 'touch', buttons = 0) => ({ pointerId: id, clientX: x, clientY: y, currentTarget: target, pointerType, buttons, preventDefault() {} });
@@ -42,6 +44,14 @@ test('touch tap clicks once; movement starts a drag and up releases it', () => {
     { type: 'button', button: 'left', down: true },
     { type: 'move', x: 190 / 320, y: .5 },
     { type: 'button', button: 'left', down: false },
+  ]);
+});
+test('two quick touch taps emit two full left clicks for the native double-click counter', () => {
+  const f = fixture();
+  for (const id of [1, 2]) { f.pointerDown(f.event(id, 160, 120)); f.pointerUp(f.event(id, 160, 120)); }
+  assert.deepEqual(f.sent.filter(v => v.type === 'button'), [
+    { type: 'button', button: 'left', down: true }, { type: 'button', button: 'left', down: false },
+    { type: 'button', button: 'left', down: true }, { type: 'button', button: 'left', down: false },
   ]);
 });
 
@@ -130,6 +140,75 @@ test('MSE without metadata cannot send input', () => {
   f.pointerDown(f.event(1, 160, 120));
   assert.deepEqual(f.sent, []);
 });
+test('physical Fn is ignored; plain f goes to remote, UI Fn applies only to next key', () => {
+  const f = fixture();
+  const event = (key, code) => ({ key, code, preventDefault() {} });
+  f.videoKey(event('Fn', 'Fn'), true);
+  f.videoKey(event('Fn', 'Fn'), false);
+  f.videoKey(event('FnLock', 'FnLock'), true);
+  f.videoKey(event('FnLock', 'FnLock'), false);
+  assert.deepEqual(f.sent, []);
+  f.videoKey(event('f', 'KeyF'), true);
+  f.videoKey(event('f', 'KeyF'), false);
+  assert.deepEqual(f.sent.splice(0), [{ type: 'key', code: 'KeyF', down: true }, { type: 'key', code: 'KeyF', down: false }]);
+  f.toggleFn();
+  f.videoKey(event('f', 'KeyF'), true);
+  f.videoKey(event('f', 'KeyF'), false);
+  f.videoKey(event('g', 'KeyG'), true);
+  f.videoKey(event('g', 'KeyG'), false);
+  assert.deepEqual(f.sent, [
+    { type: 'key', code: 'KeyF', down: true, fn: true },
+    { type: 'key', code: 'KeyF', down: false, fn: true },
+    { type: 'key', code: 'KeyG', down: true },
+    { type: 'key', code: 'KeyG', down: false },
+  ]);
+  assert.equal(f.refs.fnArmedRef.current, false);
+});
+
+test('blur releases an armed Fn key without affecting subsequent keys', () => {
+  const f = fixture();
+  const event = (key, code) => ({ key, code, preventDefault() {} });
+  f.toggleFn();
+  f.videoKey(event('f', 'KeyF'), true);
+  f.releaseVideoInput();
+  f.videoKey(event('g', 'KeyG'), true);
+  assert.deepEqual(f.sent.filter(v => v.type === 'key'), [
+    { type: 'key', code: 'KeyF', down: true, fn: true },
+    { type: 'key', code: 'KeyF', down: false, fn: true },
+    { type: 'key', code: 'KeyG', down: true },
+  ]);
+});
+test('IME composition is not forwarded as keys and consumes pending Fn on commit', () => {
+  const f = fixture();
+  const event = (key, code, isComposing = false, keyCode = 0) => ({ key, code, keyCode, nativeEvent: { isComposing }, preventDefault() {} });
+  f.toggleFn();
+  f.videoKey(event('Process', 'KeyF', true, 229), true);
+  assert.equal(f.refs.fnArmedRef.current, false);
+  f.videoKey(event('Process', 'KeyF', true, 229), false);
+  f.sendCharacter('你');
+  f.videoKey(event('f', 'KeyF'), true);
+  f.videoKey(event('f', 'KeyF'), false);
+  assert.deepEqual(f.sent, [
+    { type: 'text', text: '你' },
+    { type: 'key', code: 'KeyF', down: true }, { type: 'key', code: 'KeyF', down: false },
+  ]);
+  assert.equal(f.refs.fnArmedRef.current, false);
+});
+
+test('IME-marked key release still releases a previously held key', () => {
+  const f = fixture();
+  f.videoKey({ key: 'f', code: 'KeyF', nativeEvent: {}, preventDefault() {} }, true);
+  f.videoKey({ key: 'Process', code: 'KeyF', keyCode: 229, nativeEvent: { isComposing: true }, preventDefault() {} }, false);
+  assert.deepEqual(f.sent, [{ type: 'key', code: 'KeyF', down: true }, { type: 'key', code: 'KeyF', down: false }]);
+  assert.equal(f.refs.pressedKeys.current.size, 0);
+});
+test('Mac native agent tags both halves of a double-click and strips unintended Fn flags', () => {
+  const agent = readFileSync(new URL('../native/RemoteControlAgent.swift', import.meta.url), 'utf8');
+  assert.match(agent, /clickCount = button == lastClickButton && now - lastClickTime < 0\.5/);
+  assert.match(agent, /mouse\.setIntegerValueField\(\.mouseEventClickState, value: clickCount\)/);
+  assert.match(agent, /key\.flags = \(event\["fn"\] as\? Bool == true \? key\.flags\.union\(\.maskSecondaryFn\) : key\.flags\.subtracting\(\.maskSecondaryFn\)\)/);
+  assert.match(agent, /keyboardSetUnicodeString[\s\S]*key\.post\(tap: \.cghidEventTap\)/);
+});
 
 function viewingFixture(requestFullscreen) {
   const state = {};
@@ -165,4 +244,34 @@ test('late fullscreen fulfillment after exit is unwound', async () => {
   await f.exitViewing(); resolve(); await entered;
   assert.equal(f.document.fullscreenElement, null);
   assert.equal(f.state.mode, 'normal');
+});
+
+test('hide controls closes auxiliary input without disabling the persistent toggle', () => {
+  const button = source.match(/<button ref=\{controlsButtonRef\}[^\n]+/)[0];
+  assert.doesNotMatch(button, /disabled=/);
+  assert.match(button, /aria-controls="remote-controls"/);
+  const handler = button.match(/onClick=\{\(\) => \{ (.*?) \}\}>/)[1];
+  for (const hidden of [false, true]) {
+    const state = { more: true, clipboard: true, keyboard: true };
+    let released = false;
+    let blurred = false;
+    new Function('controlsHidden', 'releaseVideoInput', 'setMoreOpen', 'setClipboardOpen', 'inputRef', 'setMobileKeys', 'setControlsHidden', handler)(
+      hidden, () => released = true, v => state.more = v, v => state.clipboard = v,
+      { current: { blur() { blurred = true; } } }, v => state.keyboard = v, v => state.hidden = v,
+    );
+    assert.equal(released, true);
+    assert.equal(state.hidden, !hidden);
+    assert.equal(blurred, !hidden);
+    if (!hidden) assert.deepEqual(state, { more: false, clipboard: false, keyboard: false, hidden: true });
+  }
+});
+
+test('immersive controls reserve layout space and retain narrow-screen single rows', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.immersive \.toolbar > \.toolbar-group \{[^}]*flex-wrap: nowrap;[^}]*overflow-x: auto;/);
+  assert.match(css, /\.immersive \.keys \{[^}]*flex-wrap: nowrap;/);
+  assert.match(css, /\.immersive \.more-controls \{[^}]*max-height:[^}]*overflow: auto;/);
+  assert.doesNotMatch(css.match(/\.clipboard-panel \{[^}]+\}/)[0], /position: absolute/);
+  assert.match(source, /<\/section>\s*\{clipboardOpen && <section className="clipboard-panel"/);
+  assert.match(source, /if \(viewMode !== 'normal'\) controlsButtonRef.current\?\.focus/);
 });

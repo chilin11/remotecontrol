@@ -5,6 +5,15 @@ type Codec = 'hevc' | 'h264';
 type Quality = 'data' | 'balanced24' | 'balanced' | 'high15' | 'high';
 const agentPath = nativeAgentPath;
 const MAX_CAPTURE_PACKET = 16 * 1024 * 1024;
+const captures = new Set<ChildProcessWithoutNullStreams>();
+export async function stopAllCapture(): Promise<void> {
+  await Promise.all([...captures].map((child) => new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+    const timer = setTimeout(() => child.kill(), 1200);
+    child.once('close', () => { clearTimeout(timer); resolve(); });
+    child.stdin.end();
+  })));
+}
 
 function box(type: string, ...parts: Buffer[]): Buffer {
   const body = Buffer.concat(parts);
@@ -185,7 +194,7 @@ export function attachVideo(ws: WebSocket): void {
     if (startupTimer) clearTimeout(startupTimer);
     const running = child;
     running?.stdin.end();
-    if (running) setTimeout(() => running.kill(), 200).unref();
+    if (running) setTimeout(() => { if (running.exitCode === null && running.signalCode === null) running.kill(); }, 1200).unref();
     child = undefined;
   }
   function fail(message: string): void { sendJson({ type: 'error', message }); ws.close(1011); stop(); }
@@ -322,7 +331,10 @@ export function attachVideo(ws: WebSocket): void {
       started = true;
       const scriptAgent = agentPath.endsWith('.mjs');
       const selectedQuality: Quality = quality === 'minimal' || quality === 'low' || quality === 'hotel' ? 'data' : quality as Quality;
-      child = spawn(scriptAgent ? process.execPath : agentPath, scriptAgent ? [agentPath, codec as Codec, selectedQuality] : [codec as Codec, selectedQuality], { stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn(scriptAgent ? process.execPath : agentPath, scriptAgent ? [agentPath, codec as Codec, selectedQuality] : [codec as Codec, selectedQuality], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      const capture = child;
+      captures.add(capture);
+      capture.once('close', () => captures.delete(capture));
       child.stdin.on('error', () => { if (ws.readyState === WebSocket.OPEN) ws.close(1011, 'Capture input failed'); stop(); });
       child.stdout.on('data', receive);
       let stderr = '';
@@ -355,11 +367,14 @@ export function attachVideo(ws: WebSocket): void {
     } else if (type === 'wheel' && typeof event.dy === 'number' && Number.isFinite(event.dy)) {
       child.stdin.write(JSON.stringify({ type, dy: Math.trunc(Math.max(-1000, Math.min(1000, event.dy))) }) + '\n');
     } else if (type === 'key' && typeof event.code === 'string' && /^[A-Za-z0-9]{1,20}$/.test(event.code) && typeof event.down === 'boolean') {
-      child.stdin.write(JSON.stringify({ type, code: event.code, down: event.down }) + '\n');
+      child.stdin.write(JSON.stringify({ type, code: event.code, down: event.down, ...(process.platform === 'darwin' && event.fn === true ? { fn: true } : {}) }) + '\n');
     } else if (type === 'text' && typeof event.text === 'string' && event.text.length <= 32) {
       child.stdin.write(JSON.stringify({ type, text: event.text }) + '\n');
     }
   });
-  ws.on('close', stop);
+  ws.on('close', (code) => {
+    if (started) console.info(`Video connection closed (code ${code}).`);
+    stop();
+  });
   ws.on('error', stop);
 }

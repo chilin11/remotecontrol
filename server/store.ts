@@ -11,6 +11,7 @@ fs.mkdirSync(dataDir, { recursive: true, ...(supportsPosixPermissions(process.pl
 if (supportsPosixPermissions(process.platform)) fs.chmodSync(dataDir, 0o700);
 const dbPath = path.join(dataDir, 'remotecontrol.db');
 export const db = new DatabaseSync(dbPath);
+db.exec('PRAGMA busy_timeout = 5000');
 if (fs.existsSync(dbPath) && supportsPosixPermissions(process.platform)) fs.chmodSync(dbPath, 0o600);
 db.exec(`
   CREATE TABLE IF NOT EXISTS owner (id INTEGER PRIMARY KEY CHECK (id = 1), password_hash TEXT NOT NULL);
@@ -35,6 +36,10 @@ export function ownerHash(): string | null {
 export function setOwner(hash: string): void {
   db.prepare('INSERT INTO owner (id, password_hash) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash').run(hash);
   db.prepare('DELETE FROM sessions').run();
+}
+// First-run desktop setup must never overwrite a password created by another instance.
+export function createOwnerIfAbsent(hash: string): boolean {
+  return db.prepare('INSERT INTO owner (id, password_hash) VALUES (1, ?) ON CONFLICT(id) DO NOTHING').run(hash).changes === 1;
 }
 
 export function createSession(): string {

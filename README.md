@@ -2,15 +2,23 @@
 
 A browser remote desktop for one computer. The Node gateway listens on LAN by default (`0.0.0.0:8787`); use only on a trusted private network or behind HTTPS/VPN. On macOS it streams hardware-encoded video to the browser over an authenticated WebSocket, with VNC only as an optional fallback.
 
+## 桌面应用：打包与本机授权
+
+原生桌面设置入口：macOS 使用 Swift/AppKit，Windows 使用 WinForms，随包携带 Node 与运行依赖。已有密码与会话保留，默认仅本机，局域网需明确确认。Windows 支持托盘后台运行及可选的用户登录自启动；关闭窗口不停止服务，彻底退出使用托盘菜单。
+
+- macOS（Apple Silicon / macOS 26）：`pnpm package:mac` → App、可拖拽到 Applications 的 DMG、ZIP 与 SHA-256。匹配 SDK 的设置沿用下文。默认是开发 ad-hoc 签名；DMG 不会免除系统权限确认，正式分发需 Developer ID/公证。
+- Windows x64：在 Windows 上执行 `pnpm package:windows` → 完整目录与 ZIP；缺失的 FFmpeg 自动下载、校验并随包携带，无需手动准备目录。应用普通用户运行，只有主动配置私有网络防火墙时弹 UAC。
+- 安装步骤、旧 launchd 迁移、签名/离线组件要求和真实验收边界见 [DESKTOP-DEPLOY.md](DESKTOP-DEPLOY.md)。下文命令行流程仍作为开发/旧部署方式保留。
+
 ## Windows: H.264 streaming with experimental HEVC
 
 Windows has a native **video** agent in `native/windows/`: FFmpeg `gdigrab` captures the logged-in desktop; `libx264` encodes H.264, and optional `libx265` encodes HEVC. A .NET 8 process relays video and handles mouse/keyboard input. The user has run the H.264 Windows path successfully; the newly added HEVC path still needs Windows browser and performance validation. Both encoders are software-based, not Moonlight-style hardware/game capture. VNC is optional fallback, not the video path.
 
-### Windows one-click deployment ZIP
+### Windows 推荐部署：完整桌面包
 
-Extract **`remotecontrol-windows-deploy.zip`** completely, then double-click **`Start-Windows.cmd`** inside the extracted folder. The deployment includes the built website/gateway and a self-contained Windows x64 capture agent; **no Git, .NET SDK, or .NET Runtime is needed**. Install Node.js 24+ and FFmpeg once (see `WINDOWS-DEPLOY.md`), then reopen the launcher. Internet access is required to install locked runtime dependencies on first use. This is not a fully offline bundle and FFmpeg is not bundled.
+在 Windows 构建机执行 `pnpm package:windows`，自动检测并安装 FFmpeg，得到 `release/RemoteControl-windows-x64.zip`。目标机完整解压后双击 **RemoteControl.exe**，完整包无需安装 Node/.NET/FFmpeg 或首次联网安装依赖；若随包 FFmpeg 缺失，自动联网下载到当前用户目录，可通过“检查并自动修复”重试。首次保存密码后自动检查并启动；局域网、防火墙及登录自启动统一在窗口设置。关闭窗口隐藏到托盘，重复双击恢复同一实例。
 
-The launcher preserves the existing owner password and sessions, runs in the foreground, and creates no service or firewall rule. It defaults to private-LAN HTTP on port 8787; use `Start-Windows.cmd -Local` for local-only access. An existing 8787 process must be stopped by the user before starting a second copy. If downloaded scripts are blocked, see `WINDOWS-DEPLOY.md`; organization policy is not bypassed.
+详细步骤、后台机制和 Windows 真机验收见 [WINDOWS-DEPLOY.md](WINDOWS-DEPLOY.md)。根目录旧 `remotecontrol-windows-deploy.zip` / `Start-Windows.cmd` 是前台命令行兼容入口，不包含新版托盘和自启动，不要混用。
 
 ### Windows quick start (private GitHub repository)
 
@@ -34,7 +42,7 @@ Windows captures with FFmpeg `gdigrab`; `libx264` streams H.264 and optional `li
 
 For VNC fallback only, separately install a VNC server supporting classic VNC Authentication, give it a distinct password, bind it to `127.0.0.1` or block inbound port 5900 on **all** firewall profiles, then select **Use VNC fallback**. The gateway connects only to local port 5900 (or `REMOTECONTROL_VNC_PORT`); never publish it. Legacy VNC passwords may use only eight significant characters. Windows-account or vendor-specific VNC authentication may not work in noVNC.
 
-Windows uses FFmpeg/GDI and software `libx264` / `libx265`, not DXGI Desktop Duplication or hardware video encoding. HEVC may use more CPU and add latency at the same frame rate; lower bitrate does not automatically mean clearer video. It does not provide audio, gamepad, file transfer, UAC/secure desktop control, locked-session capture, guaranteed mixed-DPI alignment, automatic startup, or Windows hardware-encoder optimization. See `native/windows/README.md` for protocol and agent limitations.
+Windows uses FFmpeg/GDI and software `libx264` / `libx265`, not DXGI Desktop Duplication or hardware video encoding. HEVC may use more CPU and add latency at the same frame rate; lower bitrate does not automatically mean clearer video. It does not provide audio, gamepad, file transfer, UAC/secure desktop control, locked-session capture, guaranteed mixed-DPI alignment, or Windows hardware-encoder optimization. The desktop package provides optional per-user login startup and tray operation (not a Session 0 service). See `native/windows/README.md` for protocol and agent limitations.
 
 ## macOS: native video and VNC fallback
 
@@ -87,6 +95,7 @@ With a built native agent and owner password configured, `pnpm start` listens on
 - Only one browser controls the desktop at a time; a new connection takes over the previous one.
 - Click/touch or drag the desktop to control the pointer; use wheel/touch gestures to scroll.
 - Toolbar buttons provide modifier/special keys, text entry, mobile keyboard, and disconnect. VNC input and clipboard support vary by server.
+- On a Mac video connection, physical Fn/FnLock is not forwarded. To send Fn with a remote key, open **More**, tap **Fn**, then press the desired key; Fn clears automatically after that key. Ordinary `f` remains an ordinary key. Browser/OS-level Fn shortcuts cannot be overridden by this page.
 - **Fullscreen** requests browser fullscreen; if blocked or unavailable, it switches to a near-fullscreen **Theater** view. Use **Exit** or Escape to return. **Fit** shows the entire desktop with letterboxing; **Fill** crops the edges to occupy the viewer. Pointer/touch coordinates follow the visible portion of the image. **Hide controls** keeps an Exit/Show controls bar accessible.
 - Windows HEVC quality presets use CRF/preset tradeoffs (data 27/ultrafast, balanced 25/superfast, high 22/veryfast); see `native/windows/README.md`. H.264 MSE remains the reliable LAN HTTP playback mode.
 - **Disconnect** ends remote control. **Sign out** also revokes the website session.
