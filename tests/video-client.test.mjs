@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { transformSync } from 'esbuild';
+import { buildSync } from 'esbuild';
 
-const source = readFileSync(new URL('../src/video.ts', import.meta.url), 'utf8');
-const compiled = transformSync(source, { loader: 'ts', format: 'cjs' }).code;
+// Bundle so video.ts's local imports (stats helpers) are inlined into one evaluable CJS module.
+const compiled = buildSync({ entryPoints: [new URL('../src/video.ts', import.meta.url).pathname], bundle: true, format: 'cjs', write: false, platform: 'neutral', logLevel: 'silent' }).outputFiles[0].text;
 const module = { exports: {} };
 new Function('module', 'exports', compiled)(module, module.exports);
 const { VideoClient } = module.exports;

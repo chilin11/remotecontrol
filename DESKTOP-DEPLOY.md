@@ -2,7 +2,7 @@
 
 桌面包复用 Swift / WinForms 原生程序，不依赖 Electron。双击进入本机设置窗口；视频子进程使用同一可执行文件。成品随包包含官方 Node 24.14.1、网站、网关和平台匹配的运行依赖，无需目标电脑安装 Node / pnpm / .NET。
 
-## macOS（Apple Silicon、macOS 26）
+## macOS（Apple Silicon、macOS 13.5 Ventura 及以上）
 
 构建机器需要 Node 24、pnpm、匹配的 Swift / macOS SDK：
 
@@ -18,7 +18,8 @@ REMOTECONTROL_SWIFT_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk 
 3. 首次在窗口设置两次相同的 12–256 字符密码。已有密码自动沿用，不覆盖，也不撤销既有会话。密码通过私有进程管道传输，不放到 HTTP 设置接口、命令行或日志。
 4. 点击 **申请屏幕录制**、**申请辅助功能**，在系统界面给 **Remote Control Agent** 授权。不是给 Terminal / Node 授权。应用不需要完全磁盘访问、摄像头、麦克风权限。
 5. 授权后刷新；屏幕录制如仍显示待授权，退出并重新打开同一 App。系统确认必须由本机用户完成，不能自动批准。
-6. 两项权限和密码就绪后启动服务，再打开控制网页。默认仅本机 `127.0.0.1:8787`；需要其它设备连接时，先停止，勾选可信局域网并确认风险后启动。
+6. 两项权限和密码就绪后服务自动启动，从菜单栏图标打开控制网页。默认仅本机 `127.0.0.1:8787`；需要其它设备连接时，在窗口或菜单栏勾选“允许可信局域网访问”并确认风险，运行中会自动切换，选择会被记住。
+7. App 只显示菜单栏图标，不在 Dock 常驻。关闭设置窗口不停止服务；菜单栏图标可启动/停止、开关局域网、打开设置与日志、退出。勾选“登录时自动打开”会通过 `SMAppService` 加入 **系统设置 › 通用 › 登录项**，登录后静默在菜单栏启动并自动开启服务（沿用上次的局域网选择）；若系统要求批准，会自动打开登录项设置页。
 
 ### macOS 防火墙与网络助手身份
 
@@ -26,11 +27,11 @@ REMOTECONTROL_SWIFT_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk 
 
 网络网关仍使用自带 Node 运行，但装在 `Contents/Helpers/RemoteControlGateway.app` 内，执行文件名为 `RemoteControlGateway`，bundle / 签名标识为 `local.remotecontrol.gateway`。授权身份有明确的产品名称，不再分发裸 `runtime/node`。Node 许可证保留，改名不代表已经移除 Node。系统实际弹窗名称仍须在本机验证，不能仅凭改名保证。
 
-开启可信局域网后，macOS 可能请求允许 **Remote Control Gateway** 的入站连接，须由用户确认；拒绝可能阻止其它设备连接，与录屏/输入权限无关。本机模式不需要对其它设备开放。向导不会自动关防火墙或提权创建放行规则。
+开启可信局域网后，macOS 防火墙可能请求允许 **Remote Control Gateway** 的入站连接。这个对话框只能由用户点击，普通 App 无法代为同意；用 `socketfilterfw --add/--unblockapp` 预先放行需要管理员密码，本应用不擅自提权。真正避免反复弹出的办法是签名稳定：防火墙按代码签名记住决定。以前的 ad-hoc 签名每次构建都变化，系统会把新版当成新程序重新询问；现在默认使用固定的本机证书签名（见下），**在新版上点一次“允许”后，之后重新构建/更新都会沿用**。若用 Developer ID 正式签名，且开启了“自动允许已下载的签名软件”，则通常不会弹出。
 
 旧包的入站提示显示 `node`，若进程路径确实在已安装的 `RemoteControlAgent.app` 内，那是随包运行时，不代表在使用机器上另外安装的 Node。更新前先完成本机准备；本次构建只生成 release 产物，不替换正在运行的 App，不清除密码/session 或自动重置权限。
 
-**开发签名限制：** 未指定证书时使用 ad-hoc 签名，仅用于开发/本机试用。重编译、签名变化或搬动 App 后可能需要重新授权。固定 bundle ID 并不能保证授权永远保留。下载后的 Gatekeeper 行为与正式发布不同，不自动删除 quarantine、不绕过系统策略。
+**签名：** 未设置 `REMOTECONTROL_SIGN_IDENTITY` 时，打包脚本自动在 `~/Library/Application Support/RemoteControl-Signing/` 创建一个固定的自签名代码签名证书（独立钥匙串，不加入用户钥匙串列表），之后每次构建都用它，因此防火墙、屏幕录制、辅助功能的授权在重新构建后可保留。该证书只在构建机上有效，不是 Developer ID：Gatekeeper / 公证不适用，删掉该目录会生成新证书并需重新授权一次。设置 `REMOTECONTROL_SIGN_IDENTITY=-` 可回退为 ad-hoc。下载后的 Gatekeeper 行为与正式发布不同，不自动删除 quarantine、不绕过系统策略。
 
 正式分发可设置 `REMOTECONTROL_SIGN_IDENTITY='Developer ID Application: ...'`，脚本按原生模块、内置 Node、App 由内到外签名。可再设置 `REMOTECONTROL_NOTARY_PROFILE=<已保存的 notarytool 凭据名>` 完成公证和 staple。没有证书/账户无法生成正式公证包。Developer ID 更新身份、Node hardened-runtime/JIT 和真实权限归属仍需签名真机验收。
 
@@ -54,7 +55,7 @@ Windows GDI/SendInput 没有 macOS 式录屏/辅助功能授权开关。向导�
 
 ## 运行与数据
 
-- macOS 关闭窗口/退出应用停止网关及采集；Windows 关闭窗口仅隐藏到托盘，托盘“退出”或注销/关机才退出宿主，Job Object 清理自有进程树。
+- macOS 关闭设置窗口仅隐藏，服务继续运行；菜单栏“退出”才停止网关及采集。Windows 关闭窗口仅隐藏到托盘，托盘“退出”或注销/关机才退出宿主，Job Object 清理自有进程树。
 - 不自动接管其它占用 8787 的服务；先停止旧实例。
 - 数据仍在 macOS `~/Library/Application Support/RemoteControl` / Windows `%LOCALAPPDATA%\RemoteControl`，不会写到安装目录。日志为其中的 `desktop.log`。
 - HTTP 局域网不加密密码、会话、屏幕、输入；勿使用公共 Wi-Fi、勿转发公网端口。公网使用 HTTPS / 可信 VPN。

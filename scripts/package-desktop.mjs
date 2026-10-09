@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { ensureLocalIdentity } from './local-signing.mjs';
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const target = process.argv[2];
@@ -43,7 +44,7 @@ if (hashFile(archive) !== expected) { fs.rmSync(archive); throw new Error('Node 
 const extract = path.join(stage, 'node');
 fs.mkdirSync(extract);
 if (mac) run('tar', ['-xzf', archive, '-C', extract]);
-else run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env.RC_ARCHIVE -DestinationPath $env.RC_EXTRACT'], { env: { ...process.env, RC_ARCHIVE: archive, RC_EXTRACT: extract } });
+else run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env:RC_ARCHIVE -DestinationPath $env:RC_EXTRACT'], { env: { ...process.env, RC_ARCHIVE: archive, RC_EXTRACT: extract } });
 const nodeRoot = path.join(extract, `node-v${version}-${mac ? 'darwin-arm64' : 'win-x64'}`);
 const product = path.join(stage, mac ? 'RemoteControlAgent.app' : 'RemoteControl');
 let payload;
@@ -113,8 +114,13 @@ fs.writeFileSync(path.join(payload, 'BUILD-INFO.json'), JSON.stringify({ version
 fs.copyFileSync(path.join(project, 'DESKTOP-DEPLOY.md'), path.join(payload, 'DESKTOP-DEPLOY.md'));
 if (!mac) fs.copyFileSync(path.join(project, 'WINDOWS-DEPLOY.md'), path.join(payload, 'WINDOWS-DEPLOY.md'));
 if (mac) {
-  const identity = process.env.REMOTECONTROL_SIGN_IDENTITY || '-';
-  const sign = (file, node = false, identifier) => run('codesign', ['--force', ...(identity === '-' ? [] : ['--options', 'runtime', '--timestamp']), ...(node ? ['--entitlements', path.join(project, 'native', 'Node.entitlements.plist')] : []), ...(identifier ? ['--identifier', identifier] : []), '--sign', identity, file]);
+  // Unset: stable local self-signed identity, so firewall / Screen Recording / Accessibility decisions
+  // survive rebuilds. '-': ad-hoc. Otherwise: Developer ID with hardened runtime.
+  const requested = process.env.REMOTECONTROL_SIGN_IDENTITY;
+  const local = requested ? undefined : ensureLocalIdentity();
+  const identity = requested || local.identity;
+  const developerId = !local && identity !== '-';
+  const sign = (file, node = false, identifier) => run('codesign', ['--force', ...(local ? ['--keychain', local.keychain] : []), ...(developerId ? ['--options', 'runtime', '--timestamp'] : []), ...(node ? ['--entitlements', path.join(project, 'native', 'Node.entitlements.plist')] : []), ...(identifier ? ['--identifier', identifier] : []), '--sign', identity, file]);
   const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
   for (const file of walk(path.join(payload, 'node_modules')).filter((file) => file.endsWith('.node'))) sign(file);
   sign(nodeBinary, true, 'local.remotecontrol.gateway');
@@ -123,9 +129,10 @@ if (mac) {
   run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', product]);
   run(nodeBinary, ['--input-type=module', '-e', "import {hash,verify} from '@node-rs/argon2'; import WebSocket from 'ws'; import {DatabaseSync} from 'node:sqlite'; const h=await hash('post-sign-validation'); if(!await verify(h,'post-sign-validation')) throw Error('signed addon failed'); new DatabaseSync(':memory:').close(); console.log('Signed bundled runtime OK',process.version,typeof WebSocket);"], { cwd: payload, env });
   if (identity === '-') console.warn('Development ad-hoc signature: updates may require permission reapproval; this is not notarized.');
+  else if (local) console.warn(`Signed with stable local identity "${identity}" (self-use only, not notarized).`);
   const profile = process.env.REMOTECONTROL_NOTARY_PROFILE;
   if (profile) {
-    if (identity === '-') throw new Error('Notarization requires a Developer ID signature.');
+    if (!developerId) throw new Error('Notarization requires a Developer ID signature.');
     const submission = path.join(stage, 'notary.zip');
     run('ditto', ['-c', '-k', '--keepParent', product, submission]);
     run('xcrun', ['notarytool', 'submit', submission, '--keychain-profile', profile, '--wait']);
@@ -138,7 +145,7 @@ fs.cpSync(product, destination, { recursive: true });
 const zip = path.join(release, mac ? 'RemoteControl-mac-arm64.zip' : 'RemoteControl-windows-x64.zip');
 fs.rmSync(zip, { force: true });
 if (mac) run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', destination, zip]);
-else run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Compress-Archive -LiteralPath $env.RC_PRODUCT -DestinationPath $env.RC_ZIP'], { env: { ...process.env, RC_PRODUCT: destination, RC_ZIP: zip } });
+else run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Compress-Archive -LiteralPath $env:RC_PRODUCT -DestinationPath $env:RC_ZIP'], { env: { ...process.env, RC_PRODUCT: destination, RC_ZIP: zip } });
 fs.writeFileSync(zip + '.sha256', `${hashFile(zip)}  ${path.basename(zip)}\n`);
 fs.rmSync(stage, { recursive: true, force: true });
 console.log(`Packaged ${destination}\nArchive: ${zip}`);

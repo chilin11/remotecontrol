@@ -11,12 +11,6 @@ import WebSocket from 'ws';
 
 const temp = mkdtempSync(path.join(tmpdir(), 'remotecontrol-test-'));
 const fakeAgent = path.resolve('tests/fake-agent.mjs');
-const mockVnc = createServer((socket) => {
-  socket.write('RFB 003.008\n');
-  socket.on('data', (data) => socket.write(data));
-});
-await new Promise((resolve) => mockVnc.listen(0, '127.0.0.1', resolve));
-const vncPort = mockVnc.address().port;
 const reservation = createServer();
 await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve));
 const appPort = reservation.address().port;
@@ -30,7 +24,7 @@ db.close();
 
 const child = spawn(process.execPath, ['dist-server/index.js'], {
   cwd: process.cwd(),
-  env: { ...process.env, REMOTECONTROL_DATA_DIR: temp, REMOTECONTROL_PORT: String(appPort), REMOTECONTROL_VNC_PORT: String(vncPort), REMOTECONTROL_AGENT_PATH: fakeAgent },
+  env: { ...process.env, REMOTECONTROL_DATA_DIR: temp, REMOTECONTROL_PORT: String(appPort), REMOTECONTROL_AGENT_PATH: fakeAgent },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let childOutput = '';
@@ -40,7 +34,7 @@ for (let i = 0; i < 100 && !childOutput.includes('listening on'); i++) await new
 assert.match(childOutput, /listening on/, childOutput);
 const base = `http://127.0.0.1:${appPort}`;
 const origin = base;
-after(() => { child.kill(); mockVnc.close(); rmSync(temp, { recursive: true, force: true }); });
+after(() => { child.kill(); rmSync(temp, { recursive: true, force: true }); });
 
 function socket(url, headers = {}) {
   return new Promise((resolve) => {
@@ -51,10 +45,10 @@ function socket(url, headers = {}) {
   });
 }
 
-test('login protects API and VNC bridge', async () => {
+test('login protects the API and the legacy VNC endpoint no longer exists', async () => {
   const anon = await fetch(`${base}/api/session`);
   assert.equal((await anon.json()).authenticated, false);
-  assert.equal((await socket(`ws://127.0.0.1:${appPort}/ws`, { Origin: origin })).status, 403);
+  assert.equal((await socket(`ws://127.0.0.1:${appPort}/stream`, { Origin: origin })).status, 403);
 
   const forged = await fetch(`${base}/api/login`, { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'testing-password-123' }) });
   assert.equal(forged.status, 403);
@@ -68,22 +62,15 @@ test('login protects API and VNC bridge', async () => {
   assert.match(cookie, /^rc_session=/);
   const session = await fetch(`${base}/api/session`, { headers: { Cookie: cookie } });
   assert.equal((await session.json()).authenticated, true);
-  assert.equal((await socket(`ws://127.0.0.1:${appPort}/ws`, { Origin: 'https://evil.example', Cookie: cookie })).status, 403);
-
-  const { ws, status } = await socket(`ws://127.0.0.1:${appPort}/ws`, { Origin: origin, Cookie: cookie });
-  assert.equal(status, 101);
-  const greeting = await new Promise((resolve) => ws.once('message', (data) => resolve(data.toString())));
-  assert.equal(greeting, 'RFB 003.008\n');
-  ws.send('client data');
-  const echoed = await new Promise((resolve) => ws.once('message', (data) => resolve(data.toString())));
-  assert.equal(echoed, 'client data');
+  assert.equal((await socket(`ws://127.0.0.1:${appPort}/stream`, { Origin: 'https://evil.example', Cookie: cookie })).status, 403);
+  // The old VNC proxy is removed: even an authenticated, same-origin upgrade is refused.
+  assert.equal((await socket(`ws://127.0.0.1:${appPort}/ws`, { Origin: origin, Cookie: cookie })).status, 403);
 
   const logout = await fetch(`${base}/api/logout`, { method: 'POST', headers: { Origin: origin, Cookie: cookie } });
   assert.equal(logout.status, 200);
   const revoked = await fetch(`${base}/api/session`, { headers: { Cookie: cookie } });
   assert.equal((await revoked.json()).authenticated, false);
-  assert.equal((await socket(`ws://127.0.0.1:${appPort}/ws`, { Origin: origin, Cookie: cookie })).status, 403);
-  ws.terminate();
+  assert.equal((await socket(`ws://127.0.0.1:${appPort}/stream`, { Origin: origin, Cookie: cookie })).status, 403);
 });
 
 test('video stream is authenticated and forwards capture and input', { skip: process.platform !== 'darwin' }, async () => {
@@ -106,17 +93,29 @@ test('video stream is authenticated and forwards capture and input', { skip: pro
   ws.send(JSON.stringify({ type: 'ping' }));
   for (let i = 0; i < 100 && messages.length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(JSON.parse(messages[3].data.toString()).type, 'pong');
+  ws.send(JSON.stringify({ type: 'stats' }));
+  ws.send(JSON.stringify({ type: 'stats' })); // within 250 ms: rate limited, no second reply
+  for (let i = 0; i < 100 && messages.length < 5; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const stats = messages.slice(4).map((m) => JSON.parse(m.data.toString()));
+  assert.equal(stats.length, 1);
+  assert.equal(stats[0].type, 'stats');
+  assert.equal(stats[0].framesIn, 1);
+  assert.equal(stats[0].framesSent, 1);
+  assert.equal(stats[0].keyframes, 1);
+  assert.ok(stats[0].rssMb > 0 && stats[0].uptimeMs >= 0);
+  assert.equal(messages.filter((m) => !m.binary && JSON.parse(m.data.toString()).input?.type === 'stats').length, 0, 'stats requests never reach the agent');
   ws.terminate();
 });
 
-test('gateway reports native video by host platform and relays authenticated VNC', async () => {
+test('gateway reports native video by host platform', async () => {
   const secondReservation = createServer();
   await new Promise((resolve) => secondReservation.listen(0, '127.0.0.1', resolve));
   const secondPort = secondReservation.address().port;
   await new Promise((resolve) => secondReservation.close(resolve));
   const child = spawn(process.execPath, ['dist-server/index.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, REMOTECONTROL_DATA_DIR: temp, REMOTECONTROL_PORT: String(secondPort), REMOTECONTROL_VNC_PORT: String(vncPort) },
+    env: { ...process.env, REMOTECONTROL_DATA_DIR: temp, REMOTECONTROL_PORT: String(secondPort) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -131,24 +130,10 @@ test('gateway reports native video by host platform and relays authenticated VNC
     assert.match((await fetch(platformBase)).status.toString(), /^200$/);
     const login = await fetch(`${platformBase}/api/login`, { method: 'POST', headers: { Origin: platformBase, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'testing-password-123' }) });
     const cookie = login.headers.get('set-cookie').split(';')[0];
-    const { ws, status: wsStatus } = await socket(`ws://127.0.0.1:${secondPort}/ws`, { Origin: platformBase, Cookie: cookie });
-    assert.equal(wsStatus, 101);
-    const greeting = await new Promise((resolve) => ws.once('message', (data) => resolve(data.toString())));
-    assert.equal(greeting, 'RFB 003.008\n');
     const { ws: videoWs, status: videoStatus } = await socket(`ws://127.0.0.1:${secondPort}/stream`, { Origin: platformBase, Cookie: cookie });
     assert.equal(videoStatus, 101);
     if (process.platform === 'darwin') videoWs.terminate();
-    else {
-      const code = await new Promise((resolve) => videoWs.once('close', (closeCode) => resolve(closeCode)));
-      assert.equal(code, 1008);
-      ws.send('still controlling');
-      const echo = await Promise.race([
-        new Promise((resolve) => ws.once('message', (data) => resolve(data.toString()))),
-        new Promise((_resolve, reject) => setTimeout(() => reject(new Error('unsupported video displaced VNC')), 3000)),
-      ]);
-      assert.equal(echo, 'still controlling');
-    }
-    ws.terminate();
+    else assert.equal(await new Promise((resolve) => videoWs.once('close', (closeCode) => resolve(closeCode))), 1008);
   } finally {
     child.kill();
     await new Promise((resolve) => child.once('exit', resolve));

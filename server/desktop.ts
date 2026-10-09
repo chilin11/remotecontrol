@@ -4,10 +4,9 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import os from 'node:os';
 import { hash, Algorithm } from '@node-rs/argon2';
 import { hasOwner, createOwnerIfAbsent } from './store.js';
-import { dataDir, port } from './config.js';
+import { dataDir, lanUrls, port } from './config.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let gateway: ChildProcess | undefined;
@@ -16,8 +15,7 @@ let lan = false;
 let closing = false;
 const logPath = path.join(dataDir, 'desktop.log');
 const reply = (error?: string) => {
-  const addresses = lan ? Object.values(os.networkInterfaces()).flatMap((entries) => entries || [])
-    .filter((entry) => entry.family === 'IPv4' && !entry.internal).map((entry) => `http://${entry.address}:${port}`) : [];
+  const addresses = lan ? lanUrls(port) : [];
   process.stdout.write(JSON.stringify({ configured: hasOwner(), running, lan, url: `http://127.0.0.1:${port}`, addresses, logPath, ...(error ? { error } : {}) }) + '\n');
 };
 

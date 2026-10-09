@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import os from 'node:os';
 import WebSocket from 'ws';
 import { hostPlatform, nativeAgentPath } from './config.js';
 type Codec = 'hevc' | 'h264';
@@ -172,7 +173,6 @@ function makeFragment(sequence: number, decodeTime: number, duration: number, sa
 
 export function attachVideo(ws: WebSocket): void {
   let child: ChildProcessWithoutNullStreams | undefined;
-  let buffer = Buffer.alloc(0);
   let started = false;
   let waitingForKey = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
@@ -188,6 +188,10 @@ export function attachVideo(ws: WebSocket): void {
   let initialized = false;
   let decodeTime = 0;
   let sequence = 0;
+  // Stats for nerds counters; reported only when the browser asks with {type:'stats'}.
+  const openedAt = Date.now();
+  const counters = { framesIn: 0, framesSent: 0, framesDropped: 0, bytesSent: 0, keyframes: 0 };
+  let lastStatsAt = 0;
 
   function sendJson(value: unknown) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value)); }
   function stop() {
@@ -281,25 +285,41 @@ export function attachVideo(ws: WebSocket): void {
       if (type === 3) ws.close(1011, 'Capture failed');
       return;
     }
-    if (type !== 2 || payload.length < 2 || ws.readyState !== WebSocket.OPEN || flowPaused) return;
+    if (type !== 2 || payload.length < 2 || ws.readyState !== WebSocket.OPEN) return;
+    counters.framesIn++;
+    if (flowPaused) { counters.framesDropped++; return; }
     const key = payload[0] === 1;
     if (ws.bufferedAmount > 2_000_000) waitingForKey = true;
     if (waitingForKey) {
-      if (!key || ws.bufferedAmount > 512_000) return;
+      if (!key || ws.bufferedAmount > 512_000) { counters.framesDropped++; return; }
       waitingForKey = false;
     }
+    const before = ws.bufferedAmount;
     const sent = mse ? sendMseFrame(payload, key) : (ws.send(payload, { binary: true }), true);
+    if (sent) {
+      counters.framesSent++;
+      if (key) counters.keyframes++;
+      counters.bytesSent += Math.max(payload.length, ws.bufferedAmount - before);
+    }
     if (sent && key && startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
   }
 
+  // Reassemble agent packets without re-copying the whole pending buffer on every 64 KB pipe chunk.
+  let pending: Buffer[] = [];
+  let pendingBytes = 0;
   function receive(chunk: Buffer): void {
-    buffer = Buffer.concat([buffer, chunk]);
-    while (buffer.length >= 5) {
-      const length = buffer.readUInt32BE(1);
+    pending.push(chunk);
+    pendingBytes += chunk.length;
+    while (pendingBytes >= 5) {
+      if (pending[0].length < 5) pending = [Buffer.concat(pending, pendingBytes)];
+      const length = pending[0].readUInt32BE(1);
       if (length > MAX_CAPTURE_PACKET) { fail('Invalid capture packet'); return; }
-      if (buffer.length < 5 + length) break;
-      onPacket(buffer[0], buffer.subarray(5, 5 + length));
-      buffer = buffer.subarray(5 + length);
+      if (pendingBytes < 5 + length) break;
+      const all = pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingBytes);
+      const rest = all.subarray(5 + length);
+      pending = rest.length ? [rest] : [];
+      pendingBytes = rest.length;
+      onPacket(all[0], all.subarray(5, 5 + length));
     }
   }
 
@@ -339,19 +359,28 @@ export function attachVideo(ws: WebSocket): void {
       child.stdout.on('data', receive);
       let stderr = '';
       child.stderr.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-4000); });
-      child.on('error', () => { sendJson({ type: 'error', message: 'Capture agent unavailable. Build the native app first.' }); ws.close(1011); });
+      const windows = hostPlatform === 'win32';
+      child.on('error', () => { sendJson({ type: 'error', message: windows ? 'Capture agent unavailable. Run `pnpm build:windows` or reinstall the desktop package.' : 'Capture agent unavailable. Run `pnpm build:native` or reinstall the desktop app.' }); ws.close(1011); });
       child.on('exit', (code) => {
         if (startupTimer) clearTimeout(startupTimer);
         if (ws.readyState === WebSocket.OPEN) {
-          sendJson({ type: 'error', message: code === 0 ? 'Capture ended.' : 'Capture stopped. Check Screen Recording and Accessibility permissions.' });
+          sendJson({ type: 'error', message: code === 0 ? 'Capture ended.' : windows ? 'Capture stopped. Make sure the Windows desktop is unlocked and FFmpeg is available, then reconnect.' : 'Capture stopped. Check Screen Recording and Accessibility permissions.' });
           ws.close(1011);
         }
         if (stderr) console.error(`Capture agent: ${stderr}`);
       });
-      startupTimer = setTimeout(() => { sendJson({ type: 'error', message: 'Capture produced no video frames. Check Screen Recording permission and encoder support.' }); ws.close(1011); stop(); }, 15_000);
+      startupTimer = setTimeout(() => { sendJson({ type: 'error', message: windows ? 'Capture produced no video frames. Make sure the desktop is unlocked and FFmpeg supports gdigrab/libx264.' : 'Capture produced no video frames. Check Screen Recording permission and encoder support.' }); ws.close(1011); stop(); }, 15_000);
       return;
     }
     if (event.type === 'ping') { sendJson({ type: 'pong' }); return; }
+    if (event.type === 'stats') {
+      const now = Date.now();
+      if (now - lastStatsAt < 250) return; // at most 4 replies/s even if a client spams requests
+      lastStatsAt = now;
+      const load = os.loadavg()[0];
+      sendJson({ type: 'stats', ...counters, buffered: ws.bufferedAmount, rssMb: Math.round(process.memoryUsage().rss / 1048576), uptimeMs: now - openedAt, ...(load > 0 ? { load: Math.round(load * 100) / 100 } : {}) });
+      return;
+    }
     if (event.type === 'flow' && typeof event.paused === 'boolean') {
       flowPaused = event.paused;
       if (!flowPaused) waitingForKey = true;

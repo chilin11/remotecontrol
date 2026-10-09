@@ -148,12 +148,42 @@ test('desktop starts local-only, stops, restarts on LAN and cleans up on EOF', a
   } finally { if (!closed) await app.close(); rmSync(data, { recursive: true, force: true }); }
 });
 
-test('macOS capture stays out of the Dock while the desktop host remains visible', () => {
+test('macOS host lives only in the menu bar; capture never shows a Dock icon', () => {
   const plist = readFileSync('native/Info.plist', 'utf8');
   const agent = readFileSync('native/RemoteControlAgent.swift', 'utf8');
   const host = readFileSync('native/DesktopHost.swift', 'utf8');
   assert.match(plist, /<key>LSUIElement<\/key><true\/>/);
   assert.match(agent, /NSApplication\.shared\.setActivationPolicy\(\.prohibited\)/);
   assert.ok(agent.indexOf('DesktopHost.launch()') < agent.indexOf('setActivationPolicy(.prohibited)'));
-  assert.match(host, /app\.setActivationPolicy\(\.regular\)/);
+  assert.match(host, /app\.setActivationPolicy\(\.accessory\)/);
+  assert.doesNotMatch(host, /\.regular\)/);
+  assert.match(host, /NSStatusBar\.system\.statusItem/);
+  // Closing the settings window must not terminate the app / stop the service.
+  assert.doesNotMatch(host, /windowWillClose[^}]*terminate/);
+});
+
+test('macOS login item uses SMAppService and remembers the LAN choice', () => {
+  const host = readFileSync('native/DesktopHost.swift', 'utf8');
+  assert.match(host, /import ServiceManagement/);
+  assert.match(host, /SMAppService\.mainApp/);
+  assert.match(host, /service\.register\(\)/);
+  assert.match(host, /service\.unregister\(\)/);
+  assert.match(host, /UserDefaults\.standard\.(?:bool|set)\(.*lanKey/);
+});
+
+test('macOS packages default to a stable local signature instead of ad-hoc', () => {
+  const packager = readFileSync('scripts/package-desktop.mjs', 'utf8');
+  const native = readFileSync('scripts/build-native.sh', 'utf8');
+  assert.match(packager, /ensureLocalIdentity\(\)/);
+  assert.doesNotMatch(packager, /REMOTECONTROL_SIGN_IDENTITY \|\| '-'/);
+  assert.match(native, /local-signing\.mjs/);
+  // swiftc otherwise targets the build machine's OS, making the app unlaunchable on older macOS.
+  assert.match(native, /-target "arm64-apple-macos\$MIN_OS"/);
+  assert.match(native, /LSMinimumSystemVersion/);
+});
+
+test('macOS minimum version matches the bundled Node runtime (Ventura 13.5), not the build machine', () => {
+  for (const file of ['native/Info.plist', 'native/GatewayInfo.plist']) {
+    assert.match(readFileSync(file, 'utf8'), /<key>LSMinimumSystemVersion<\/key><string>13\.5<\/string>/, file);
+  }
 });

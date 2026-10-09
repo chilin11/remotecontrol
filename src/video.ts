@@ -1,3 +1,5 @@
+import { parseServerStats, type ServerStats, type VideoStats } from './stats';
+
 type Quality = 'data' | 'balanced24' | 'balanced' | 'high15' | 'high';
 type Codec = 'hevc' | 'h264';
 type Playback = 'canvas' | 'mse';
@@ -29,9 +31,49 @@ export class VideoClient {
   private resumeProbeAt = 0;
   private inputQueue: Array<{ kind: 'input'; value: Record<string, unknown> } | { kind: 'text'; value: string; done: () => void }> = [];
   private drainingInput = false;
+  // Stats for nerds: cumulative counters, cheap enough to keep even when the overlay is hidden.
+  private width = 0;
+  private height = 0;
+  private connectedAt = 0;
+  private bytes = 0;
+  private packets = 0;
+  private keyframes = 0;
+  private lastKeyframeBytes = 0;
+  private framesRendered = 0;
+  private framesDropped = 0;
+  private decoderResets = 0;
+  private inputsSent = 0;
+  private pingSentAt = 0;
+  private rttMs?: number;
+  private rttMinMs?: number;
+  private serverStats?: ServerStats;
 
   get activeCodec(): Codec | undefined { return this.codec; }
   get renderMode(): Playback { return this.playback; }
+
+  /** Snapshot of cumulative counters; rates are derived by comparing two snapshots. */
+  stats(): VideoStats {
+    const quality = this.video?.getVideoPlaybackQuality?.();
+    let bufferedSec = 0;
+    const source = this.sourceBuffer;
+    try {
+      if (this.video && source?.buffered.length) bufferedSec = Math.max(0, source.buffered.end(source.buffered.length - 1) - this.video.currentTime);
+    } catch { /* source buffer was removed */ }
+    return {
+      at: performance.now(), codec: this.codec, codecString: this.codecString, playback: this.playback,
+      width: this.width, height: this.height, declaredFps: this.fps, connectedMs: this.connectedAt ? Date.now() - this.connectedAt : 0,
+      bytes: this.bytes, packets: this.packets, keyframes: this.keyframes, lastKeyframeBytes: this.lastKeyframeBytes,
+      framesRendered: this.playback === 'mse' ? quality?.totalVideoFrames ?? 0 : this.framesRendered,
+      framesDropped: this.framesDropped + (this.playback === 'mse' ? quality?.droppedVideoFrames ?? 0 : 0),
+      decoderResets: this.decoderResets, decodeQueue: this.decoder?.decodeQueueSize ?? 0,
+      bufferedSec, queuedBytes: this.queuedBytes,
+      rttMs: this.rttMs, rttMinMs: this.rttMinMs, uplinkBuffered: this.ws?.bufferedAmount ?? 0, inputsSent: this.inputsSent, flowPaused: this.flowPaused,
+      server: this.serverStats,
+    };
+  }
+
+  /** Asks the gateway for its counters; only sent while the overlay is open. */
+  requestServerStats(): void { this.sendImmediate({ type: 'stats' }); }
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -84,7 +126,9 @@ export class VideoClient {
       this.lastPong = Date.now();
       this.lastReceived = this.lastPong;
       this.lastHeartbeatTick = this.lastPong;
+      this.connectedAt = this.lastPong;
       ws.send(JSON.stringify({ type: 'start', codec: choice!.codec, quality, ...(this.playback === 'mse' ? { format: 'mse' } : {}) }));
+      this.ping();
       this.startupTimer = setTimeout(() => {
         if (!this.ready && !this.stopped) this.onError(`${this.codec === 'hevc' ? 'HEVC' : 'H.264'} decoding failed to start.`);
       }, hevcMseVideo && choice!.codec === 'hevc' ? 20_000 : 12_000);
@@ -96,7 +140,7 @@ export class VideoClient {
         this.lastHeartbeatTick = now;
         // Video traffic also proves liveness when pong is delayed behind queued frames.
         if (now - Math.max(this.lastReceived, this.resumeProbeAt) > 45_000) { this.close(); this.onClose(1006); return; }
-        ws.send(JSON.stringify({ type: 'ping' }));
+        this.ping();
       }, 15_000);
     };
     ws.onmessage = (event) => {
@@ -104,18 +148,38 @@ export class VideoClient {
       this.lastReceived = Date.now();
       if (typeof event.data === 'string') {
         try {
-          const message = JSON.parse(event.data) as { type: string; message?: string } & Partial<StreamInfo>;
-          if (message.type === 'pong') { this.lastPong = Date.now(); return; }
+          const message = JSON.parse(event.data) as { type: string; message?: string } & Partial<StreamInfo> & Record<string, unknown>;
+          if (message.type === 'pong') { this.recordPong(); return; }
+          if (message.type === 'stats') { this.serverStats = parseServerStats(message) ?? this.serverStats; return; }
           if (message.type === 'error') { this.onError(message.message || 'Capture failed.'); return; }
           if (message.type === 'stream') this.configureStream(message as StreamInfo);
         } catch { this.onError('Video decoder could not start.'); }
       } else if (event.data instanceof ArrayBuffer) {
+        this.bytes += event.data.byteLength;
+        this.packets++;
         if (this.playback === 'mse') this.appendMsePacket(new Uint8Array(event.data));
         else this.decode(new Uint8Array(event.data));
       }
     };
     ws.onerror = () => this.onError('Video connection failed.');
     ws.onclose = (event) => { if (this.heartbeat) clearInterval(this.heartbeat); if (!this.stopped) this.onClose(event.code); };
+  }
+
+  private ping(): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    this.pingSentAt = performance.now();
+    ws.send(JSON.stringify({ type: 'ping' }));
+  }
+
+  private recordPong(): void {
+    this.lastPong = Date.now();
+    if (!this.pingSentAt) return;
+    // Pong queues behind video frames, so this is application RTT: network plus send backlog.
+    const rtt = performance.now() - this.pingSentAt;
+    this.pingSentAt = 0;
+    this.rttMs = this.rttMs === undefined ? rtt : this.rttMs * 0.6 + rtt * 0.4;
+    this.rttMinMs = Math.min(this.rttMinMs ?? rtt, rtt);
   }
 
   private configureStream(message: StreamInfo): void {
@@ -126,6 +190,8 @@ export class VideoClient {
       return;
     }
     this.fps = message.fps && Number.isFinite(message.fps) && message.fps > 0 ? message.fps : 30;
+    this.width = message.width;
+    this.height = message.height;
     if (this.playback === 'mse') {
       if (message.format !== 'mse') { this.onError('The server did not provide an MSE stream.'); return; }
       this.setupMediaSource(message.width, message.height);
@@ -143,6 +209,7 @@ export class VideoClient {
         const context = this.canvas.getContext('2d', { alpha: false });
         if (context) context.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
         frame.close();
+        this.framesRendered++;
         this.markReady();
       },
       error: () => this.onError('Video decoding failed.'),
@@ -200,7 +267,8 @@ export class VideoClient {
     }
     if (packet[0] !== 1 || packet.length < 3) return;
     const key = packet[1] === 1;
-    if (this.waitingForKey && !key) return;
+    if (key) { this.keyframes++; this.lastKeyframeBytes = packet.length - 2; }
+    if (this.waitingForKey && !key) { this.framesDropped++; return; }
     if (key) this.waitingForKey = false;
     const segment = packet.slice(2).buffer;
     this.mseQueue.push(segment);
@@ -251,12 +319,16 @@ export class VideoClient {
   private decode(packet: Uint8Array): void {
     if (!this.decoder || packet.length < 2) return;
     const key = packet[0] === 1;
+    if (key) { this.keyframes++; this.lastKeyframeBytes = packet.length - 1; }
     if (this.decoder.decodeQueueSize > 3) {
+      // Decoder is behind: drop the backlog and resume at the next keyframe.
+      this.framesDropped += this.decoder.decodeQueueSize;
+      this.decoderResets++;
       this.decoder.reset();
       this.decoder.configure({ codec: this.codecString!, codedWidth: this.canvas.width, codedHeight: this.canvas.height, hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true });
       this.waitingForKey = true;
     }
-    if (this.waitingForKey && !key) return;
+    if (this.waitingForKey && !key) { this.framesDropped++; return; }
     if (key) this.waitingForKey = false;
     const chunk = new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: Math.round((++this.sequence * 1_000_000) / this.fps), data: packet.subarray(1) });
     try { this.decoder.decode(chunk); } catch { this.onError('Video decoder rejected a frame.'); }
@@ -283,6 +355,7 @@ export class VideoClient {
       return;
     }
     ws.send(JSON.stringify(value));
+    if (value.type !== 'ping' && value.type !== 'stats' && value.type !== 'flow') this.inputsSent++;
   }
 
   sendText(text: string): Promise<void> {

@@ -26,9 +26,11 @@ if (action === 'install') {
   if (!fs.existsSync(agent)) throw new Error('Build the native video agent first with `pnpm build:native`.');
   fs.mkdirSync(launchDir, { recursive: true });
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const host = process.env.REMOTECONTROL_HOST || '0.0.0.0';
+  if (host !== '0.0.0.0' && host !== '127.0.0.1') throw new Error('REMOTECONTROL_HOST must be 127.0.0.1 or 0.0.0.0');
   const vars = {
+    REMOTECONTROL_HOST: host,
     REMOTECONTROL_PORT: process.env.REMOTECONTROL_PORT || '8787',
-    REMOTECONTROL_VNC_PORT: process.env.REMOTECONTROL_VNC_PORT || '5900',
     REMOTECONTROL_DATA_DIR: dataDir,
   };
   const env = Object.entries(vars).map(([key, value]) => `<key>${xml(key)}</key><string>${xml(value)}</string>`).join('');

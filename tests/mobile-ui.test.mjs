@@ -275,3 +275,13 @@ test('immersive controls reserve layout space and retain narrow-screen single ro
   assert.match(source, /<\/section>\s*\{clipboardOpen && <section className="clipboard-panel"/);
   assert.match(source, /if \(viewMode !== 'normal'\) controlsButtonRef.current\?\.focus/);
 });
+
+test('fullscreen is only offered while connected, but an open view can always be exited', () => {
+  const button = source.match(/<button className="fullscreen-trigger"[^\n]+/)[0];
+  const disabled = button.match(/disabled=\{(.*?)\} title=/)[1];
+  const isDisabled = (status, viewMode, viewPending = false) => new Function('status', 'viewMode', 'viewPending', `return ${disabled};`)(status, viewMode, viewPending);
+  for (const status of ['idle', 'connecting', 'disconnected']) assert.equal(isDisabled(status, 'normal'), true, `${status}: nothing to view yet`);
+  assert.equal(isDisabled('connected', 'normal'), false);
+  assert.equal(isDisabled('disconnected', 'theater'), false, 'Exit view stays usable');
+  assert.equal(isDisabled('connected', 'normal', true), true, 'pending request blocks double taps');
+});

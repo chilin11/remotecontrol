@@ -11,9 +11,6 @@ importers:
       '@node-rs/argon2':
         specifier: ^2.0.2
         version: 2.2.1
-      '@novnc/novnc':
-        specifier: ^1.6.0
-        version: 1.7.0
       react:
         specifier: ^19.1.1
         version: 19.3.0
@@ -452,9 +449,6 @@ packages:
   '@node-rs/argon2@2.2.1':
     resolution: {integrity: sha512-miqgmDcvOoAxCf0H3iW2nSd09FFO15geUU30yRNEr2XVXYreErwxAOm1rAKHxNDdjcySA+UTDGMXOWtvFJ3hXQ==}
     engines: {node: '>= 10'}
-
-  '@novnc/novnc@1.7.0':
-    resolution: {integrity: sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==}
 
   '@rollup/rollup-android-arm-eabi@4.63.4':
     resolution: {integrity: sha512-I+BSHzTAhKN2n7ZwGZsegGcZjDpLqFOMAtJz/u6uFGe0pUFbq56dEHjqJV/ZUdRJtNXNxA+hREUatZBvMR3Oiw==}
@@ -954,8 +948,6 @@ snapshots:
       '@node-rs/argon2-win32-arm64-msvc': 2.2.1
       '@node-rs/argon2-win32-ia32-msvc': 2.2.1
       '@node-rs/argon2-win32-x64-msvc': 2.2.1
-
-  '@novnc/novnc@1.7.0': {}
 
   '@rollup/rollup-android-arm-eabi@4.63.4':
     optional: true

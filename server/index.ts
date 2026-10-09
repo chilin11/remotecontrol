@@ -2,11 +2,10 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createConnection, type Socket } from 'node:net';
 import { verify } from '@node-rs/argon2';
-import WebSocket, { WebSocketServer, createWebSocketStream } from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { hasOwner, ownerHash, createSession, validSession, revokeSession } from './store.js';
-import { gatewayHost, hostPlatform, nativeVideoAvailable, port, vncHost, vncPort } from './config.js';
+import { gatewayHost, hostPlatform, lanUrls, nativeVideoAvailable, port } from './config.js';
 import { attachVideo, stopAllCapture } from './video.js';
 
 const staticRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
@@ -16,9 +15,7 @@ const server = http.createServer((req, res) => {
     else res.destroy();
   });
 });
-const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 1024 * 1024 });
 const videoWss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 2048 });
-let controller: { ws: WebSocket; tcp: Socket; token: string } | undefined;
 let videoController: { ws: WebSocket; token: string } | undefined;
 const loginAttempts: number[] = [];
 
@@ -73,21 +70,30 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const pathname = new URL(req.url || '/', 'http://localhost').pathname;
   if (pathname.startsWith('/api/')) {
     if (pathname === '/api/session' && req.method === 'GET') {
-      json(res, 200, { authenticated: validSession(cookie(req), true), configured: hasOwner(), controlling: !!controller || !!videoController, platform: hostPlatform, nativeVideo: nativeVideoAvailable, hevcVideo: nativeVideoAvailable && (hostPlatform === 'darwin' || hostPlatform === 'win32'), hevcCodecString: hostPlatform === 'win32' ? 'hvc1.1.6.L150.90' : 'hvc1.1.6.L150.B0', hevcMseVideo: hostPlatform === 'win32' });
+      json(res, 200, { authenticated: validSession(cookie(req), true), configured: hasOwner(), controlling: !!videoController, platform: hostPlatform, nativeVideo: nativeVideoAvailable, hevcVideo: nativeVideoAvailable && (hostPlatform === 'darwin' || hostPlatform === 'win32'), hevcCodecString: hostPlatform === 'win32' ? 'hvc1.1.6.L150.90' : 'hvc1.1.6.L150.B0', hevcMseVideo: hostPlatform === 'win32' });
       return;
     }
     if (req.method !== 'POST' || !sameOrigin(req)) { json(res, 403, { error: 'Forbidden' }); return; }
     if (pathname === '/api/login') {
       const now = Date.now();
       while (loginAttempts[0] && now - loginAttempts[0] > 5 * 60_000) loginAttempts.shift();
-      if (loginAttempts.length >= 10) { json(res, 429, { error: 'Too many attempts. Try again later.' }); return; }
+      if (loginAttempts.length >= 10) {
+        const waitMinutes = Math.max(1, Math.ceil((loginAttempts[0] + 5 * 60_000 - now) / 60_000));
+        json(res, 429, { error: `Too many failed attempts. Try again in ${waitMinutes} minute${waitMinutes === 1 ? '' : 's'}.` });
+        return;
+      }
+      // Reserve the slot before the slow hash so parallel guesses still count.
       loginAttempts.push(now);
       let body: unknown;
       try { body = await readJson(req); } catch { json(res, 400, { error: 'Invalid request' }); return; }
       const password = (body as { password?: unknown })?.password;
       if (typeof password !== 'string' || password.length > 256) { json(res, 400, { error: 'Invalid request' }); return; }
       const hash = ownerHash();
-      if (!hash || !(await verify(hash, password))) { json(res, 401, { error: 'Incorrect password' }); return; }
+      if (!hash) { json(res, 409, { error: 'No owner password is set yet. Set one on the host computer first.' }); return; }
+      if (!(await verify(hash, password))) { json(res, 401, { error: 'Incorrect password' }); return; }
+      // Successful sign-ins must not lock the owner out (e.g. several devices or re-logins).
+      const slot = loginAttempts.lastIndexOf(now);
+      if (slot >= 0) loginAttempts.splice(slot, 1);
       const token = createSession();
       res.setHeader('Set-Cookie', setCookie(req, token, 7 * 24 * 60 * 60));
       json(res, 200, { authenticated: true });
@@ -96,7 +102,6 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (pathname === '/api/logout') {
       const token = cookie(req);
       revokeSession(token);
-      if (controller && controller.token === token) { controller.tcp.destroy(); controller.ws.close(4001, 'Signed out'); }
       if (videoController && videoController.token === token) videoController.ws.close(4001, 'Signed out');
       res.setHeader('Set-Cookie', setCookie(req, '', 0));
       json(res, 200, { authenticated: false });
@@ -118,42 +123,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
 server.on('upgrade', (req, socket, head) => {
   const token = cookie(req);
-  if ((req.url !== '/ws' && req.url !== '/stream') || !sameOrigin(req) || !validSession(token, true)) {
+  if (req.url !== '/stream' || !sameOrigin(req) || !validSession(token, true)) {
     socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     socket.destroy();
     return;
   }
-  const target = req.url === '/stream' ? videoWss : wss;
-  target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, token));
-});
-
-wss.on('connection', (ws: WebSocket, token: string) => {
-  if (controller) { controller.tcp.destroy(); controller.ws.close(4000, 'Another session took control'); }
-  if (videoController) videoController.ws.close(4000, 'Another session took control');
-  const tcp = createConnection({ host: vncHost, port: vncPort });
-  controller = { ws, tcp, token };
-  const stream = createWebSocketStream(ws, { highWaterMark: 64 * 1024 });
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    if (controller?.ws === ws) controller = undefined;
-    tcp.destroy();
-    if (ws.readyState === WebSocket.OPEN) ws.close();
-  };
-  tcp.on('connect', () => {
-    stream.pipe(tcp);
-    tcp.pipe(stream);
-  });
-  tcp.on('error', close);
-  tcp.on('close', close);
-  stream.on('error', close);
-  ws.on('close', close);
-  ws.on('message', () => { validSession(token, true); });
-  const check = setInterval(() => {
-    if (!validSession(token)) ws.close(4001, 'Session expired');
-  }, 30_000);
-  ws.on('close', () => clearInterval(check));
+  videoWss.handleUpgrade(req, socket, head, (ws) => videoWss.emit('connection', ws, token));
 });
 
 videoWss.on('connection', (ws: WebSocket, token: string) => {
@@ -161,7 +136,6 @@ videoWss.on('connection', (ws: WebSocket, token: string) => {
     ws.close(1008, 'Native video is not supported on this platform');
     return;
   }
-  if (controller) { controller.tcp.destroy(); controller.ws.close(4000, 'Another session took control'); }
   if (videoController) videoController.ws.close(4000, 'Another session took control');
   videoController = { ws, token };
   attachVideo(ws);
@@ -171,10 +145,23 @@ videoWss.on('connection', (ws: WebSocket, token: string) => {
   ws.on('close', () => clearInterval(check));
 });
 
+server.on('error', (error: NodeJS.ErrnoException) => {
+  // Keep the EADDRINUSE token: the desktop controller maps it to a localized hint.
+  if (error.code === 'EADDRINUSE') console.error(`Port ${port} is already in use (EADDRINUSE). Stop the other Remote Control instance or set REMOTECONTROL_PORT.`);
+  else if (error.code === 'EACCES') console.error(`Permission denied while listening on ${gatewayHost}:${port} (EACCES). Choose a port above 1024 with REMOTECONTROL_PORT.`);
+  else console.error(`Remote Control could not start: ${error.message}`);
+  process.exit(1);
+});
+
 server.listen(port, gatewayHost, () => {
-  console.log(`Remote Control listening on http://${gatewayHost === '0.0.0.0' ? '<this-computer-LAN-IP>' : gatewayHost}:${port} (local: http://127.0.0.1:${port})`);
-  if (gatewayHost === '0.0.0.0') console.warn('LAN HTTP is unencrypted. Use only on a trusted private network; use HTTPS or a trusted VPN on public networks.');
-  if (!hasOwner()) console.log('Run `pnpm setup` before signing in.');
+  const lan = gatewayHost === '0.0.0.0' ? lanUrls(port) : [];
+  console.log(`Remote Control listening on http://${gatewayHost}:${port} (local: http://127.0.0.1:${port})`);
+  if (gatewayHost === '0.0.0.0') {
+    console.log(lan.length ? `Open from another device on this network: ${lan.join('  ')}` : 'No LAN IPv4 address detected; only http://127.0.0.1 is reachable right now.');
+    console.warn('LAN HTTP is unencrypted. Use only on a trusted private network; use HTTPS or a trusted VPN on public networks.');
+  }
+  if (!fs.existsSync(path.join(staticRoot, 'index.html'))) console.warn('Web UI is not built: run `pnpm build` first.');
+  if (!hasOwner()) console.log('No owner password yet: run `pnpm run setup` in a terminal on this computer, then sign in.');
 });
 
 // The desktop host owns this process; shutting it down must stop native capture too.
@@ -182,8 +169,7 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  for (const ws of [...wss.clients, ...videoWss.clients]) ws.terminate();
-  controller?.tcp.destroy();
+  for (const ws of videoWss.clients) ws.terminate();
   await stopAllCapture();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 300).unref();

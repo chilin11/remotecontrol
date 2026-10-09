@@ -7,3 +7,9 @@ dist-native/
 *.db-shm
 *.db-wal
 release/
+.DS_Store
+.pi/
+native/windows/bin/
+native/windows/obj/
+/remotecontrol-windows-*.zip
+/remotecontrol-windows-*.zip.sha256
