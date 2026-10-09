@@ -9,49 +9,6 @@ using System.Globalization;
 
 namespace RemoteControl.Windows;
 
-internal sealed record QualityPreset(string Codec, string Name, int MaxWidth, int Fps)
-{
-    public bool IsHevc => Codec == "hevc";
-
-    public static QualityPreset Parse(string[] args)
-    {
-        // The gateway passes codec then quality, as it does for the macOS agent.
-        string codec = "h264";
-        string name;
-        if (args.Length > 1)
-        {
-            codec = ParseCodec(args[0]);
-            name = args[1].Trim().ToLowerInvariant();
-        }
-        else if (args.Length == 1 && IsCodec(args[0]))
-        {
-            codec = ParseCodec(args[0]);
-            name = "balanced";
-        }
-        else name = args.Length == 0 ? "balanced" : args[0].Trim().ToLowerInvariant();
-
-        return name switch
-        {
-            "minimal" or "low" or "hotel" or "data" => new(codec, "data", 1280, 24),
-            "balanced24" => new(codec, name, 1920, 24),
-            "balanced" => new(codec, name, 1920, 30),
-            "high15" => new(codec, name, 2560, 15),
-            "high" => new(codec, name, 2560, 60),
-            _ => throw new ArgumentException("Quality preset must be data, balanced24, balanced, high15, or high.")
-        };
-    }
-
-    private static bool IsCodec(string value) => value.Trim().Equals("h264", StringComparison.OrdinalIgnoreCase) ||
-                                                  value.Trim().Equals("hevc", StringComparison.OrdinalIgnoreCase);
-
-    private static string ParseCodec(string value) => value.Trim().ToLowerInvariant() switch
-    {
-        "h264" => "h264",
-        "hevc" => "hevc",
-        _ => throw new ArgumentException("Codec must be h264 or hevc.")
-    };
-}
-
 internal static class Program
 {
     [STAThread]
@@ -81,19 +38,21 @@ internal static class Program
             if (screen.Width < 2 || screen.Height < 2)
                 throw new InvalidOperationException("Windows did not report a usable virtual screen.");
 
-            int width = Math.Min(screen.Width, preset.MaxWidth) & ~1;
-            int height = Math.Max(2, (int)Math.Floor((double)screen.Height * width / screen.Width)) & ~1;
-            width = Math.Max(2, width);
-            height = Math.Max(2, height);
-            if (!preset.IsHevc)
+            var (width, height) = preset.Fit(screen.Width, screen.Height);
+            if (preset.IsHevc)
             {
-                var limits = VideoLimits.H264Level5(width, height, preset.Fps);
+                // Peak (2× target) also drives the level: Main-tier MaxBR is 25/40/60 Mbps for 5.0/5.1/5.2.
+                preset = preset with { Level = VideoLimits.HevcLevel(width, height, preset.Fps, preset.Bitrate * 2L) };
+            }
+            else
+            {
+                // H.264 uses Level 5.0–5.2; only unusually large desktops are scaled or slowed further.
+                var limits = VideoLimits.H264(width, height, preset.Fps);
                 width = limits.Width;
                 height = limits.Height;
-                preset = preset with { Fps = limits.Fps };
+                preset = preset with { Fps = limits.Fps, Level = limits.Level };
             }
-            var writer = new PacketWriter();
-            return Agent.RunAsync(writer, preset, screen, width, height).GetAwaiter().GetResult();
+            return Agent.RunAsync(preset, screen, width, height).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
@@ -104,41 +63,11 @@ internal static class Program
     }
 }
 
-internal sealed class PacketWriter
-{
-    private const int MaxPacketBytes = 16 * 1024 * 1024;
-    private static readonly Stream Output = Console.OpenStandardOutput();
-    private static readonly object Gate = new();
-
-    public static void WriteError(string message) => new PacketWriter().WriteJson(3, new { type = "error", message });
-
-    public void WriteJson<T>(byte type, T value)
-    {
-        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(value);
-        Write(type, payload);
-    }
-
-    public static void Write(byte type, ReadOnlySpan<byte> payload)
-    {
-        if (payload.Length > MaxPacketBytes)
-            throw new InvalidDataException("Packet exceeds the 16 MiB protocol limit.");
-        Span<byte> header = stackalloc byte[5];
-        header[0] = type;
-        BinaryPrimitives.WriteUInt32BigEndian(header[1..], checked((uint)payload.Length));
-        lock (Gate)
-        {
-            Output.Write(header);
-            Output.Write(payload);
-            Output.Flush();
-        }
-    }
-}
-
 internal static class Agent
 {
     private const int MaxInputLineChars = 16 * 1024;
 
-    public static async Task<int> RunAsync(PacketWriter writer, QualityPreset preset, Rectangle screen, int width, int height)
+    public static async Task<int> RunAsync(QualityPreset preset, Rectangle screen, int width, int height)
     {
         string ffmpeg = Environment.GetEnvironmentVariable("REMOTECONTROL_FFMPEG_PATH") ?? "ffmpeg.exe";
         if (string.IsNullOrWhiteSpace(ffmpeg))
@@ -146,7 +75,73 @@ internal static class Agent
         if ((ffmpeg.Contains(Path.DirectorySeparatorChar) || ffmpeg.Contains(Path.AltDirectorySeparatorChar)) && !File.Exists(ffmpeg))
             throw new FileNotFoundException("The configured FFmpeg executable was not found.", ffmpeg);
 
-        using var process = new Process { StartInfo = BuildStartInfo(ffmpeg, preset, screen, width, height), EnableRaisingEvents = true };
+        var input = new InputController(screen);
+        var inputGate = new object();
+        using var inputCancellation = new CancellationTokenSource();
+        CancellationToken inputToken = inputCancellation.Token;
+        // Windows redirected console reads may block synchronously and ignore cancellation.
+        // Keep them off the coordinator thread; never await an idle read during shutdown.
+        // Start before encoder probing so a disconnect during probing is noticed and probes are killed.
+        Task inputTask = Task.Run(() => ReadInput(inputToken, input, inputGate));
+        try
+        {
+            // GPU first (NVIDIA → AMD → Intel), then the same GPU encoder with GDI capture, then CPU encoding.
+            // A failed attempt is only retried if it never produced a frame, so the browser sees one clean stream.
+            EncoderBackend selected;
+            using (var probeCancellation = CancellationTokenSource.CreateLinkedTokenSource(inputToken))
+            {
+                Task<EncoderBackend> selection = Task.Run(() => EncoderSelector.Select(ffmpeg, preset.Codec, probeCancellation.Token));
+                if (await Task.WhenAny(selection, inputTask) == inputTask)
+                {
+                    probeCancellation.Cancel();
+                    try { await selection; } catch (OperationCanceledException) { }
+                    return 0;
+                }
+                selected = await selection;
+            }
+            // Desktop Duplication returns rotated displays unrotated; GDI capture follows the desktop orientation.
+            bool singleDisplay = Screen.AllScreens.Length == 1 && !DisplayInfo.PrimaryIsRotated();
+            var attempts = new List<(EncoderBackend Backend, bool SingleDisplay)>();
+            if (selected != EncoderBackend.Software)
+            {
+                if (singleDisplay) attempts.Add((selected, true));
+                attempts.Add((selected, false));
+            }
+            attempts.Add((EncoderBackend.Software, false));
+
+            for (int index = 0; index < attempts.Count; index++)
+            {
+                var (backend, useDda) = attempts[index];
+                bool last = index == attempts.Count - 1;
+                var result = await RunPipelineAsync(ffmpeg, backend, preset, screen, width, height, useDda, inputTask);
+                if (result.InputEnded) return 0;
+                if (result.Error is null) return 0;
+                if (!result.ProducedFrames && !last)
+                {
+                    Console.Error.WriteLine($"Video pipeline {FfmpegPipeline.Name(backend)}{(useDda ? "/ddagrab" : "/gdigrab")} failed, trying the next option: {result.Error}");
+                    if (backend != EncoderBackend.Software && attempts[index + 1].Backend == EncoderBackend.Software)
+                        EncoderSelector.Forget(ffmpeg, preset.Codec);
+                    continue;
+                }
+                PacketWriter.WriteError(result.Error);
+                return 1;
+            }
+            return 1;
+        }
+        finally
+        {
+            inputCancellation.Cancel();
+            // Release immediately even if the Windows stdin pipe is still blocked.
+            lock (inputGate) input.ReleaseHeldInputs();
+        }
+    }
+
+    private sealed record PipelineResult(bool InputEnded, bool ProducedFrames, string? Error);
+
+    private static async Task<PipelineResult> RunPipelineAsync(string ffmpeg, EncoderBackend backend, QualityPreset preset,
+        Rectangle screen, int width, int height, bool useDda, Task inputTask)
+    {
+        using var process = new Process { StartInfo = BuildStartInfo(ffmpeg, backend, preset, screen, width, height, useDda), EnableRaisingEvents = true };
         try
         {
             if (!process.Start()) throw new InvalidOperationException("FFmpeg could not be started.");
@@ -158,69 +153,52 @@ internal static class Agent
 
         var stderr = new StderrTail();
         Task stderrTask = stderr.CollectAsync(process.StandardError);
-        var parser = new AnnexBAccessUnitParser(preset.Codec);
-        var input = new InputController(screen);
-        var inputGate = new object();
-        using var inputCancellation = new CancellationTokenSource();
-        Task? captureTask = null;
-        Task? inputTask = null;
-        bool inputReachedEof = false;
+        // Stream metadata goes out just before the first frame, so a failed GPU attempt sends nothing.
+        var parser = new AnnexBAccessUnitParser(preset.Codec, () => new PacketWriter().WriteJson(1, new
+        {
+            type = "stream",
+            codec = preset.Codec,
+            codecString = preset.CodecString,
+            width,
+            height,
+            fps = preset.Fps,
+            encoder = FfmpegPipeline.Name(backend)
+        }));
+        Task captureTask = PumpCaptureAsync(process.StandardOutput.BaseStream, parser);
         try
         {
-            writer.WriteJson(1, new
-            {
-                type = "stream",
-                codec = preset.Codec,
-                codecString = preset.IsHevc ? "hvc1.1.6.L150.90" : "avc1.42E032",
-                width,
-                height,
-                fps = preset.Fps
-            });
-            captureTask = PumpCaptureAsync(process.StandardOutput.BaseStream, parser);
-            // Windows redirected console reads may block synchronously and ignore cancellation.
-            // Keep them off the coordinator thread; never await an idle read during shutdown.
-            CancellationToken inputToken = inputCancellation.Token;
-            inputTask = Task.Run(() => ReadInput(inputToken, input, inputGate));
             Task first = await Task.WhenAny(captureTask, inputTask);
             if (first == inputTask)
             {
                 await inputTask;
-                inputReachedEof = true;
-                inputCancellation.Cancel();
-                lock (inputGate) input.ReleaseHeldInputs();
                 StopProcess(process);
                 try { await captureTask; }
                 catch (IOException) { }
                 catch (ObjectDisposedException) { }
+                return new PipelineResult(true, parser.EmittedFrames, null);
             }
-            else
+            try { await captureTask; }
+            catch (InvalidDataException ex) when (!parser.EmittedFrames)
             {
-                await captureTask;
                 StopProcess(process);
+                return new PipelineResult(false, false, ex.Message);
             }
+            StopProcess(process);
             await process.WaitForExitAsync();
             await stderrTask;
-            if (!inputReachedEof)
-            {
-                string detail = stderr.GetText();
-                string message = $"FFmpeg stopped with code {process.ExitCode}" + (detail.Length == 0 ? "." : $": {detail}");
-                if (preset.IsHevc && IsMissingLibx265(detail))
-                    message = $"This FFmpeg build does not include the libx265 HEVC encoder. Install an FFmpeg build with libx265 enabled or select h264. {message}";
-                PacketWriter.WriteError(message);
-                return 1;
-            }
-            return 0;
+            string detail = stderr.GetText();
+            string message = $"FFmpeg stopped with code {process.ExitCode}" + (detail.Length == 0 ? "." : $": {detail}");
+            if (backend == EncoderBackend.Software && preset.IsHevc && IsMissingLibx265(detail))
+                message = $"This FFmpeg build does not include the libx265 HEVC encoder. Install an FFmpeg build with libx265 enabled or select h264. {message}";
+            return new PipelineResult(false, parser.EmittedFrames, message);
         }
         finally
         {
-            inputCancellation.Cancel();
             StopProcess(process);
-            // Release immediately even if the Windows stdin pipe is still blocked.
-            lock (inputGate) input.ReleaseHeldInputs();
         }
     }
 
-    private static ProcessStartInfo BuildStartInfo(string ffmpeg, QualityPreset preset, Rectangle screen, int width, int height)
+    private static ProcessStartInfo BuildStartInfo(string ffmpeg, EncoderBackend backend, QualityPreset preset, Rectangle screen, int width, int height, bool useDda)
     {
         var info = new ProcessStartInfo
         {
@@ -231,34 +209,7 @@ internal static class Agent
             RedirectStandardError = true,
             RedirectStandardInput = false
         };
-        string[] commonArguments =
-        [
-            "-hide_banner", "-loglevel", "warning", "-nostats", "-nostdin",
-            "-f", "gdigrab", "-framerate", preset.Fps.ToString(CultureInfo.InvariantCulture), "-draw_mouse", "1",
-            "-video_size", $"{screen.Width}x{screen.Height}",
-            "-offset_x", screen.Left.ToString(CultureInfo.InvariantCulture), "-offset_y", screen.Top.ToString(CultureInfo.InvariantCulture), "-i", "desktop",
-            "-an", "-vf", $"scale={width}:{height}:flags=fast_bilinear"
-        ];
-        // CRF controls visual quality/bitrate; slower presets trade CPU and latency for compression.
-        string hevcPreset = preset.Name switch { "data" => "ultrafast", "high" or "high15" => "veryfast", _ => "superfast" };
-        string hevcCrf = preset.Name switch { "data" => "27", "high" or "high15" => "22", _ => "25" };
-        string[] encoderArguments = preset.IsHevc
-            ?
-            [
-                "-c:v", "libx265", "-preset", hevcPreset, "-tune", "zerolatency", "-crf", hevcCrf,
-                "-profile:v", "main", "-level:v", "5.0", "-pix_fmt", "yuv420p",
-                "-x265-params", $"aud=1:repeat-headers=1:keyint={preset.Fps}:min-keyint={preset.Fps}:scenecut=0:bframes=0:open-gop=0:level-idc=5.0:high-tier=0",
-                "-flush_packets", "1", "-f", "hevc", "pipe:1"
-            ]
-            :
-            [
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-profile:v", "baseline", "-level:v", "5.0", "-pix_fmt", "yuv420p",
-                "-x264-params", $"aud=1:repeat-headers=1:keyint={preset.Fps}:min-keyint={preset.Fps}:scenecut=0",
-                "-flush_packets", "1", "-f", "h264", "pipe:1"
-            ];
-        foreach (string argument in commonArguments) info.ArgumentList.Add(argument);
-        foreach (string argument in encoderArguments) info.ArgumentList.Add(argument);
+        foreach (string argument in FfmpegPipeline.Arguments(backend, preset, screen, width, height, useDda)) info.ArgumentList.Add(argument);
         return info;
     }
 
@@ -336,157 +287,39 @@ internal static class Agent
     }
 }
 
-/// <summary>Splits continuous Annex-B H.264/HEVC output at AUD NALs.</summary>
-internal sealed class AnnexBAccessUnitParser
+/// <summary>Display orientation via EnumDisplaySettings; Desktop Duplication does not rotate captured frames.</summary>
+internal static class DisplayInfo
 {
-    private const int MaxNalOrAccessUnitBytes = 16 * 1024 * 1024;
-    private readonly string codec;
-    private readonly bool isHevc;
-    private readonly List<byte> pending = new();
-    private readonly MemoryStream accessUnit = new();
-    private bool accessUnitHasKeyframe;
-    private bool accessUnitHasVcl;
-    private byte[]? hevcVps;
-    private byte[]? hevcSps;
-    private byte[]? hevcPps;
+    private const int CurrentSettings = -1;
 
-    public AnnexBAccessUnitParser(string codec)
+    public static bool PrimaryIsRotated()
     {
-        this.codec = codec;
-        isHevc = codec == "hevc";
-    }
-
-    public void Push(ReadOnlySpan<byte> chunk)
-    {
-        foreach (byte value in chunk) pending.Add(value);
-        ParseCompleteNals();
-        if (pending.Count > MaxNalOrAccessUnitBytes)
-            throw new InvalidDataException($"FFmpeg emitted an oversized or unframed {codec} NAL unit.");
-    }
-
-    public void Finish()
-    {
-        ParseCompleteNals();
-        int start = FindStartCode(pending, 0, out _);
-        if (start >= 0)
+        try
         {
-            if (start > 0) pending.RemoveRange(0, start);
-            ProcessNal(pending.ToArray());
+            var mode = new DEVMODE { dmSize = (short)Marshal.SizeOf<DEVMODE>() };
+            // DMDO_DEFAULT = 0; 90/180/270 are 1/2/3. Unknown → treat as rotated so GDI capture is used.
+            return !EnumDisplaySettings(null, CurrentSettings, ref mode) || mode.dmDisplayOrientation != 0;
         }
-        pending.Clear();
-        EmitAccessUnit();
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return true; }
     }
 
-    private void ParseCompleteNals()
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DEVMODE
     {
-        while (true)
-        {
-            int start = FindStartCode(pending, 0, out _);
-            if (start < 0)
-            {
-                int keep = Math.Min(3, pending.Count);
-                if (pending.Count > keep) pending.RemoveRange(0, pending.Count - keep);
-                return;
-            }
-            if (start > 0) pending.RemoveRange(0, start);
-            int firstLength;
-            _ = FindStartCode(pending, 0, out firstLength);
-            int next = FindStartCode(pending, firstLength, out _);
-            if (next < 0) return;
-            ProcessNal(pending.GetRange(0, next).ToArray());
-            pending.RemoveRange(0, next);
-        }
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public int dmFields;
+        public int dmPositionX, dmPositionY;
+        public int dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
     }
 
-    private void ProcessNal(byte[] nal)
-    {
-        _ = FindStartCode(nal, 0, out int prefixLength);
-        if (prefixLength == 0 || nal.Length <= prefixLength) return;
-        byte nalType = isHevc
-            ? (byte)((nal[prefixLength] >> 1) & 0x3f)
-            : (byte)(nal[prefixLength] & 0x1f);
-        if (isHevc && nalType is >= 32 and <= 34)
-        {
-            // Keep parameter sets out of a preceding frame if x265 emits them before AUD.
-            if (nalType == 32) hevcVps = nal;
-            else if (nalType == 33) hevcSps = nal;
-            else hevcPps = nal;
-            return;
-        }
-        bool isAud = isHevc ? nalType == 35 : nalType == 9;
-        bool isVcl = isHevc ? nalType <= 31 : nalType == 1 || nalType == 5;
-        bool isKeyframe = isHevc ? nalType is >= 16 and <= 23 : nalType == 5;
-        if (isAud && accessUnitHasVcl) EmitAccessUnit();
-        accessUnit.Write(nal);
-        if (isVcl) accessUnitHasVcl = true;
-        if (isKeyframe) accessUnitHasKeyframe = true;
-        if (accessUnit.Length > MaxNalOrAccessUnitBytes)
-            throw new InvalidDataException($"FFmpeg emitted an oversized {codec} access unit.");
-    }
-
-    private void EmitAccessUnit()
-    {
-        if (accessUnit.Length == 0) return;
-        if (accessUnitHasKeyframe && isHevc && (hevcVps is null || hevcSps is null || hevcPps is null))
-            throw new InvalidDataException("HEVC encoder key access unit is missing VPS/SPS/PPS parameter sets.");
-        long totalNalBytes = accessUnit.Length + (accessUnitHasKeyframe && isHevc
-            ? hevcVps!.Length + hevcSps!.Length + hevcPps!.Length
-            : 0);
-        if (totalNalBytes + 1 > MaxNalOrAccessUnitBytes)
-            throw new InvalidDataException($"{codec} access unit exceeds the packet size limit.");
-        byte[] payload = new byte[checked((int)totalNalBytes + 1)];
-        payload[0] = accessUnitHasKeyframe ? (byte)1 : (byte)0;
-        byte[] accessUnitBytes = accessUnit.ToArray();
-        int parameterSetInsertOffset = 0;
-        if (accessUnitHasKeyframe && isHevc)
-        {
-            int firstNalStart = FindStartCode(accessUnitBytes, 0, out int firstPrefixLength);
-            if (firstNalStart == 0 && accessUnitBytes.Length > firstPrefixLength &&
-                ((accessUnitBytes[firstPrefixLength] >> 1) & 0x3f) == 35)
-            {
-                int afterAud = FindStartCode(accessUnitBytes, firstPrefixLength, out _);
-                parameterSetInsertOffset = afterAud < 0 ? accessUnitBytes.Length : afterAud;
-            }
-        }
-        int destinationOffset = 1;
-        Buffer.BlockCopy(accessUnitBytes, 0, payload, destinationOffset, parameterSetInsertOffset);
-        destinationOffset += parameterSetInsertOffset;
-        if (accessUnitHasKeyframe && isHevc)
-        {
-            Buffer.BlockCopy(hevcVps!, 0, payload, destinationOffset, hevcVps!.Length);
-            destinationOffset += hevcVps!.Length;
-            Buffer.BlockCopy(hevcSps!, 0, payload, destinationOffset, hevcSps!.Length);
-            destinationOffset += hevcSps!.Length;
-            Buffer.BlockCopy(hevcPps!, 0, payload, destinationOffset, hevcPps!.Length);
-            destinationOffset += hevcPps!.Length;
-        }
-        Buffer.BlockCopy(accessUnitBytes, parameterSetInsertOffset, payload, destinationOffset,
-            accessUnitBytes.Length - parameterSetInsertOffset);
-        PacketWriter.Write(2, payload);
-        accessUnit.SetLength(0);
-        accessUnitHasKeyframe = false;
-        accessUnitHasVcl = false;
-    }
-
-    private static int FindStartCode(IReadOnlyList<byte> bytes, int from, out int length)
-    {
-        for (int i = Math.Max(0, from); i + 2 < bytes.Count; i++)
-        {
-            if (bytes[i] != 0 || bytes[i + 1] != 0) continue;
-            if (i + 3 < bytes.Count && bytes[i + 2] == 0 && bytes[i + 3] == 1)
-            {
-                length = 4;
-                return i;
-            }
-            if (bytes[i + 2] == 1)
-            {
-                length = 3;
-                return i;
-            }
-        }
-        length = 0;
-        return -1;
-    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettings(string? deviceName, int modeNum, ref DEVMODE devMode);
 }
 
 internal sealed class InputController

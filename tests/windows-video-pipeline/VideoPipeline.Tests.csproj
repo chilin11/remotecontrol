@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../native/windows/AnnexBAccessUnitParser.cs" Link="AnnexBAccessUnitParser.cs" />
+    <Compile Include="../../native/windows/PacketWriter.cs" Link="PacketWriter.cs" />
+    <Compile Include="../../native/windows/VideoPipeline.cs" Link="VideoPipeline.cs" />
+    <Compile Include="../../native/windows/VideoLimits.cs" Link="VideoLimits.cs" />
+  </ItemGroup>
+</Project>

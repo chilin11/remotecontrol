@@ -1,9 +1,19 @@
 import { parseServerStats, type ServerStats, type VideoStats } from './stats';
 
-type Quality = 'data' | 'balanced24' | 'balanced' | 'high15' | 'high';
+export type Quality = '720p30' | '1080p24' | '1080p30' | '1080p60' | '2160p24' | '2160p30' | '2160p60';
+
+/** Same codec, profile, tier and constraints; only the level (5.0–5.2) may differ from what was negotiated. */
+export function sameCodecFamily(expected: string | undefined, actual: unknown): actual is string {
+  if (!expected || typeof actual !== 'string') return false;
+  const avc = /^avc1\.42E0(32|33|34)$/i;
+  if (avc.test(expected)) return avc.test(actual);
+  const hevc = /^(hvc1\.1\.6)\.L(150|153|156)\.([0-9A-F]{2})$/i;
+  const want = hevc.exec(expected), got = hevc.exec(actual);
+  return !!want && !!got && want[1] === got[1] && want[3].toUpperCase() === got[3].toUpperCase();
+}
 type Codec = 'hevc' | 'h264';
 type Playback = 'canvas' | 'mse';
-type StreamInfo = { codec: Codec; codecString: string; width: number; height: number; fps?: number; format?: string };
+type StreamInfo = { codec: Codec; codecString: string; width: number; height: number; fps?: number; format?: string; encoder?: string };
 
 export class VideoClient {
   private ws?: WebSocket;
@@ -20,6 +30,7 @@ export class VideoClient {
   private stopped = false;
   private codec?: Codec;
   private codecString?: string;
+  private encoder?: string;
   private playback: Playback = 'canvas';
   private flowPaused = false;
   private startupTimer?: ReturnType<typeof setTimeout>;
@@ -60,7 +71,7 @@ export class VideoClient {
       if (this.video && source?.buffered.length) bufferedSec = Math.max(0, source.buffered.end(source.buffered.length - 1) - this.video.currentTime);
     } catch { /* source buffer was removed */ }
     return {
-      at: performance.now(), codec: this.codec, codecString: this.codecString, playback: this.playback,
+      at: performance.now(), codec: this.codec, codecString: this.codecString, encoder: this.encoder, playback: this.playback,
       width: this.width, height: this.height, declaredFps: this.fps, connectedMs: this.connectedAt ? Date.now() - this.connectedAt : 0,
       bytes: this.bytes, packets: this.packets, keyframes: this.keyframes, lastKeyframeBytes: this.lastKeyframeBytes,
       framesRendered: this.playback === 'mse' ? quality?.totalVideoFrames ?? 0 : this.framesRendered,
@@ -184,12 +195,15 @@ export class VideoClient {
 
   private configureStream(message: StreamInfo): void {
     if (message.codec !== this.codec) { this.onError('Video stream codec did not match requested codec.'); return; }
+    // The agent raises the level (5.0–5.2) for 4K60; profile/tier/constraints must still match what was negotiated.
     const expected = this.codec === 'hevc' ? this.codecString : 'avc1.42E032';
-    if (message.codecString !== expected || !Number.isInteger(message.width) || !Number.isInteger(message.height) || message.width <= 0 || message.height <= 0) {
+    if (!sameCodecFamily(expected, message.codecString) || !Number.isInteger(message.width) || !Number.isInteger(message.height) || message.width <= 0 || message.height <= 0) {
       this.onError('Video stream configuration is invalid.');
       return;
     }
+    this.codecString = message.codecString;
     this.fps = message.fps && Number.isFinite(message.fps) && message.fps > 0 ? message.fps : 30;
+    this.encoder = typeof message.encoder === 'string' && /^[a-z0-9]{1,16}$/.test(message.encoder) ? message.encoder : undefined;
     this.width = message.width;
     this.height = message.height;
     if (this.playback === 'mse') {

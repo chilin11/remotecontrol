@@ -7,24 +7,44 @@ import CoreGraphics
 import ApplicationServices
 
 private let codecName = CommandLine.arguments.dropFirst().first ?? "hevc"
-private let qualityName = CommandLine.arguments.dropFirst(2).first ?? "balanced"
+private let qualityName = CommandLine.arguments.dropFirst(2).first ?? "1080p30"
 private let codecType: CMVideoCodecType = codecName == "h264" ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC
 
 private struct Quality {
     let width: Int
+    let height: Int
     let fps: Int
     let bitrate: Int
 }
 private let quality: Quality = {
+    // Older gateways/browsers may still pass the previous preset names.
     switch qualityName {
-    case "minimal", "low", "hotel", "data": return Quality(width: 1280, fps: 24, bitrate: 1_500_000)
-    case "balanced24": return Quality(width: 2560, fps: 24, bitrate: 5_000_000)
-    case "balanced": return Quality(width: 2560, fps: 30, bitrate: 6_000_000)
-    case "high15": return Quality(width: 3840, fps: 15, bitrate: 8_000_000)
-    case "high": return Quality(width: 3840, fps: 30, bitrate: 14_000_000)
-    default: return Quality(width: 1920, fps: 30, bitrate: 4_000_000)
+    case "720p30", "minimal", "low", "hotel", "data": return Quality(width: 1280, height: 720, fps: 30, bitrate: 4_000_000)
+    case "1080p24", "balanced24": return Quality(width: 1920, height: 1080, fps: 24, bitrate: 6_000_000)
+    case "1080p60": return Quality(width: 1920, height: 1080, fps: 60, bitrate: 12_000_000)
+    case "2160p24", "high15": return Quality(width: 3840, height: 2160, fps: 24, bitrate: 16_000_000)
+    case "2160p30", "high": return Quality(width: 3840, height: 2160, fps: 30, bitrate: 20_000_000)
+    case "2160p60": return Quality(width: 3840, height: 2160, fps: 60, bitrate: 35_000_000)
+    default: return Quality(width: 1920, height: 1080, fps: 30, bitrate: 8_000_000)
     }
 }()
+
+/// Lowest HEVC Main-tier level (general_level_idc 150/153/156 = 5.0/5.1/5.2) covering the frame size, sample rate
+/// and the target bitrate (MaxBR 25/40/60 Mbps). VideoToolbox's AutoLevel picks the real level; this is the declared one.
+private func hevcLevel(_ width: Int, _ height: Int, _ fps: Int) -> Int {
+    let samples = width * height
+    if samples <= 8_912_896 && samples * fps <= 267_386_880 && quality.bitrate <= 25_000_000 { return 150 }
+    if samples <= 8_912_896 && samples * fps <= 534_773_760 && quality.bitrate <= 40_000_000 { return 153 }
+    return 156
+}
+
+/// Lowest H.264 level (level_idc 50/51/52) for the stream, from Table A-1 MaxFS/MaxMBPS.
+private func h264Level(_ width: Int, _ height: Int, _ fps: Int) -> Int {
+    let macroblocks = ((width + 15) / 16) * ((height + 15) / 16)
+    if macroblocks <= 22_080 && macroblocks * fps <= 589_824 { return 50 }
+    if macroblocks <= 36_864 && macroblocks * fps <= 983_040 { return 51 }
+    return 52
+}
 
 final class PacketWriter {
     private let lock = NSLock()
@@ -76,7 +96,8 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         let pixelWidth = displayMode?.pixelWidth ?? display.width
         let pixelHeight = displayMode?.pixelHeight ?? display.height
         guard pixelWidth >= 2, pixelHeight >= 2 else { throw NSError(domain: "RemoteControl", code: 3, userInfo: [NSLocalizedDescriptionKey: "Display pixel dimensions are unavailable"]) }
-        let ratio = min(1.0, Double(quality.width) / Double(pixelWidth))
+        // Fit inside the preset's resolution box (e.g. 1920×1080) without upscaling, keeping the aspect ratio.
+        let ratio = min(1.0, min(Double(quality.width) / Double(pixelWidth), Double(quality.height) / Double(pixelHeight)))
         width = max(2, (Int(Double(pixelWidth) * ratio) / 2) * 2)
         height = max(2, (Int(Double(pixelHeight) * ratio) / 2) * 2)
         try makeEncoder()
@@ -90,7 +111,7 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "remotecontrol.capture"))
         self.stream = stream
-        let codecString = codecName == "hevc" ? "hvc1.1.6.L150.B0" : "avc1.42E032"
+        let codecString = codecName == "hevc" ? "hvc1.1.6.L\(hevcLevel(width, height, quality.fps)).B0" : String(format: "avc1.42E0%02X", h264Level(width, height, quality.fps))
         writer.json(["type": "stream", "codec": codecName, "codecString": codecString, "width": width, "height": height, "fps": quality.fps])
         try await stream.startCapture()
         DispatchQueue.global(qos: .userInteractive).async { self.readInput() }

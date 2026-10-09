@@ -3,7 +3,15 @@ import os from 'node:os';
 import WebSocket from 'ws';
 import { hostPlatform, nativeAgentPath } from './config.js';
 type Codec = 'hevc' | 'h264';
-type Quality = 'data' | 'balanced24' | 'balanced' | 'high15' | 'high';
+export const qualities = ['720p30', '1080p24', '1080p30', '1080p60', '2160p24', '2160p30', '2160p60'] as const;
+type Quality = typeof qualities[number];
+// Preset names used by earlier versions, still accepted from cached browsers.
+const legacyQualities: Record<string, Quality> = { minimal: '720p30', low: '720p30', hotel: '720p30', data: '720p30', balanced24: '1080p24', balanced: '1080p30', high15: '2160p24', high: '2160p30' };
+export function normalizeQuality(value: unknown): Quality | undefined {
+  if (typeof value !== 'string') return undefined;
+  if ((qualities as readonly string[]).includes(value)) return value as Quality;
+  return Object.hasOwn(legacyQualities, value) ? legacyQualities[value] : undefined;
+}
 const agentPath = nativeAgentPath;
 const MAX_CAPTURE_PACKET = 16 * 1024 * 1024;
 const captures = new Set<ChildProcessWithoutNullStreams>();
@@ -216,7 +224,9 @@ export function attachVideo(ws: WebSocket): void {
       if (!initialized && key && vps && sps && pps && width > 0 && height > 0) {
         try {
           const profile = parseHevcSpsProfile(sps);
-          if (profile.profileSpace !== 0 || profile.tier !== 0 || profile.profileIdc !== 1 || profile.compatibility !== 0x60000000 || profile.level !== 150 || profile.constraints[0] !== 0x90 || profile.constraints.subarray(1).some((value) => value !== 0) || profile.chromaFormat !== 1 || profile.bitDepthLumaMinus8 !== 0 || profile.bitDepthChromaMinus8 !== 0) throw new Error('HEVC SPS does not match the configured Windows Main profile');
+          // x265 and GPU encoders (NVENC/AMF/QSV) differ in constraint/compatibility bits; hvcC copies the real
+          // values, so only require what the browser decoder depends on: Main profile, Main tier, 8-bit 4:2:0, level <= 5.2 (4K60).
+          if (profile.profileSpace !== 0 || profile.tier !== 0 || profile.profileIdc !== 1 || profile.level > 156 || profile.chromaFormat !== 1 || profile.bitDepthLumaMinus8 !== 0 || profile.bitDepthChromaMinus8 !== 0) throw new Error('HEVC SPS does not match the configured Windows Main profile');
           ws.send(Buffer.concat([Buffer.from([0]), makeHevcInitSegment(vps, sps, pps, width, height)]), { binary: true });
           initialized = true;
         } catch {
@@ -343,14 +353,14 @@ export function attachVideo(ws: WebSocket): void {
         ws.close(1008);
         return;
       }
-      if ((codec !== 'hevc' && codec !== 'h264') || (quality !== 'minimal' && quality !== 'low' && quality !== 'hotel' && quality !== 'data' && quality !== 'balanced24' && quality !== 'balanced' && quality !== 'high15' && quality !== 'high') || (mse && codec !== 'h264' && codec !== 'hevc')) {
+      const selectedQuality = normalizeQuality(quality);
+      if ((codec !== 'hevc' && codec !== 'h264') || !selectedQuality || (mse && codec !== 'h264' && codec !== 'hevc')) {
         sendJson({ type: 'error', message: 'Invalid stream settings' });
         ws.close(1008);
         return;
       }
       started = true;
       const scriptAgent = agentPath.endsWith('.mjs');
-      const selectedQuality: Quality = quality === 'minimal' || quality === 'low' || quality === 'hotel' ? 'data' : quality as Quality;
       child = spawn(scriptAgent ? process.execPath : agentPath, scriptAgent ? [agentPath, codec as Codec, selectedQuality] : [codec as Codec, selectedQuality], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
       const capture = child;
       captures.add(capture);

@@ -6,7 +6,7 @@ export type ServerStats = {
 
 export type VideoStats = {
   at: number;
-  codec?: 'hevc' | 'h264'; codecString?: string; playback: 'canvas' | 'mse';
+  codec?: 'hevc' | 'h264'; codecString?: string; encoder?: string; playback: 'canvas' | 'mse';
   width: number; height: number; declaredFps: number; connectedMs: number;
   bytes: number; packets: number; keyframes: number; lastKeyframeBytes: number;
   framesRendered: number; framesDropped: number; decoderResets: number;

@@ -61,7 +61,7 @@ pnpm package:windows
 - 主机必须保持登录、普通桌面可访问；锁屏、UAC 安全桌面、受保护内容和更高权限窗口不支持控制。机器睡眠后也无法连接，本程序不自动关闭锁屏/睡眠策略。
 - 本机使用 `http://127.0.0.1:8787`，局域网使用窗口给出的 IP 地址。HTTP 不加密密码、会话、画面和输入，仅用于可信私有网络；禁止公网端口映射。外网使用 HTTPS 或可信 VPN。
 - 改动仅触及属于本产品且属性匹配的私有网络规则；规则冲突时不覆盖未知规则。规则存在不保证网络可达。
-- HEVC 是软件 libx265，性能取决于 CPU；浏览器或编码失败时回退 H.264。请用 Balanced 验证画面持续变化、鼠标键盘和断开重连，不只看 Connected 标签。
+- 默认使用 HEVC，自动选择显卡编码（NVIDIA NVENC → AMD AMF → Intel Quick Sync），单显示器时用 Desktop Duplication 采集；没有可用显卡编码时回退软件 libx265/libx264。打开 Stats for nerds 的 **Encoder** 一行可确认是否在用 GPU。需要较新的显卡驱动；可用环境变量 `REMOTECONTROL_VIDEO_ENCODER=nvenc|amf|qsv|software` 强制指定。浏览器或编码失败时回退 H.264。请用 Balanced 验证画面持续变化、鼠标键盘和断开重连，不只看 Connected 标签。
 
 ## 5. 发布前 Windows 真机验收
 

@@ -1,20 +1,27 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { VideoClient } from './video';
+import { VideoClient, type Quality } from './video';
 import { StatsPanel } from './StatsPanel';
 import { Arrow, Chart, Dots, Expand, Keyboard, LogOut, Logo, Monitor, Play, Power, Shield, Sliders, TextIcon } from './icons';
 import './style.css';
 
 type Status = 'idle' | 'connecting' | 'connected' | 'disconnected';
-type Quality = 'data' | 'balanced24' | 'balanced' | 'high15' | 'high';
-const qualityPresets: { value: Quality; label: string; detail: string }[] = [
-  { value: 'data', label: 'Data saver', detail: '1280px · 24 fps · ~1.5 Mbps target on Mac' },
-  { value: 'balanced24', label: 'Balanced · 24 fps', detail: 'Mac: 2560px · 24 fps · ~5 Mbps target; Windows: 1920px · 24 fps' },
-  { value: 'balanced', label: 'Balanced · 30 fps', detail: 'Mac: 2560px · 30 fps · ~6 Mbps target; Windows: 1920px · 30 fps' },
-  { value: 'high15', label: 'High · 15 fps', detail: 'Static work · Mac: 3840px · 15 fps · ~8 Mbps target; Windows: 2560px · 15 fps · variable bitrate' },
-  { value: 'high', label: 'High', detail: 'Mac: 3840px · 30 fps · ~14 Mbps target; Windows: 2560px · 60 fps' },
+type Resolution = '720p' | '1080p' | '2160p';
+const resolutions: { value: Resolution; label: string; detail: string; fps: readonly number[] }[] = [
+  { value: '720p', label: '720p', detail: '1280×720 · lowest bandwidth', fps: [30] },
+  { value: '1080p', label: '1080p', detail: '1920×1080 · everyday work', fps: [24, 30, 60] },
+  { value: '2160p', label: '2160p (4K)', detail: '3840×2160 · needs a GPU encoder and fast LAN', fps: [24, 30, 60] },
 ];
+// Approximate GPU-encoder targets; software encoding uses constant quality instead.
+const qualityBitrate: Record<Quality, string> = { '720p30': '~4 Mbps', '1080p24': '~6 Mbps', '1080p30': '~8 Mbps', '1080p60': '~12 Mbps', '2160p24': '~16 Mbps', '2160p30': '~20 Mbps', '2160p60': '~35 Mbps' };
+const qualityLabel = (value: Quality) => `${value.replace(/p(\d+)$/, 'p · $1 fps')}`;
+const legacyQualities: Record<string, Quality> = { minimal: '720p30', low: '720p30', hotel: '720p30', data: '720p30', balanced24: '1080p24', balanced: '1080p30', high15: '2160p24', high: '2160p30' };
+function storedQuality(value: string | null): Quality {
+  if (value && Object.hasOwn(legacyQualities, value)) return legacyQualities[value];
+  return value && Object.hasOwn(qualityBitrate, value) ? value as Quality : '1080p30';
+}
+const splitQuality = (value: Quality) => { const [resolution, fps] = value.split('p'); return { resolution: `${resolution}p` as Resolution, fps: Number(fps) }; };
 
 const videoSpecialCodes = { Escape: 'Escape', Tab: 'Tab', Return: 'Enter', Backspace: 'Backspace', Delete: 'Delete', Left: 'ArrowLeft', Up: 'ArrowUp', Right: 'ArrowRight', Down: 'ArrowDown' } as const;
 type SpecialKey = keyof typeof videoSpecialCodes;
@@ -57,9 +64,8 @@ function App() {
   const [hevcMseVideo, setHevcMseVideo] = useState(false);
   const [quality, setQuality] = useState<Quality>(() => {
     try {
-      const value = localStorage.getItem('remotecontrol-quality');
-      return value === 'minimal' || value === 'low' || value === 'hotel' ? 'data' : qualityPresets.some((preset) => preset.value === value) ? value as Quality : 'balanced';
-    } catch { return 'balanced'; }
+      return storedQuality(localStorage.getItem('remotecontrol-quality'));
+    } catch { return '1080p30'; }
   });
   const qualityRef = useRef(quality);
   const [qualityOpen, setQualityOpen] = useState(false);
@@ -559,7 +565,6 @@ function App() {
       return;
     }
     if (status !== 'connected') return;
-    if (viewMode !== 'normal' && event.key === 'Tab') return; // Remote Tab remains available in the toolbar.
     event.preventDefault();
     if (down) {
       if (pressedKeys.current.has(event.code)) return;
@@ -574,7 +579,15 @@ function App() {
 
   if (loading) return <main className="landing"><div className="boot" role="status"><span className="boot-ring" aria-hidden="true" /><span>initializing secure link…</span></div></main>;
   const platformName = hostPlatform === 'darwin' ? 'macOS' : hostPlatform === 'win32' ? 'Windows' : hostPlatform || 'unknown';
-  const presetLabel = qualityPresets.find((preset) => preset.value === quality)?.label ?? '';
+  const presetLabel = qualityLabel(quality);
+  const draft = splitQuality(draftQuality);
+  const draftResolution = resolutions.find((item) => item.value === draft.resolution) ?? resolutions[1];
+  // Switching resolution keeps the frame rate when available, otherwise the closest one (720p is 30 fps only).
+  const pickResolution = (value: Resolution) => {
+    const options = resolutions.find((item) => item.value === value)!.fps;
+    const fps = options.includes(draft.fps) ? draft.fps : options.reduce((best, item) => Math.abs(item - draft.fps) < Math.abs(best - draft.fps) ? item : best);
+    setDraftQuality(`${value}${fps}` as Quality);
+  };
   const secure = location.protocol === 'https:';
   if (!authenticated) return <main className="landing">
     <section className="login-card">
@@ -672,13 +685,19 @@ function App() {
         <p className="eyebrow">&gt; settings</p>
         <h2 id="quality-title">Stream quality</h2>
         <p id="quality-description" className="subtle">Clarity or motion. Choose what fits your work and your connection.</p>
-        <fieldset className="quality-options"><legend className="sr-only">Quality preset</legend>
-          {qualityPresets.map((preset) => <label key={preset.value} className={`quality-option ${draftQuality === preset.value ? 'selected' : ''}`}>
-            <input type="radio" name="quality" value={preset.value} checked={draftQuality === preset.value} onChange={() => setDraftQuality(preset.value)} />
-            <span><strong>{preset.label}</strong>{preset.value === 'high15' && <span className="recommendation">Static work</span>}<small>{preset.detail}</small></span>
+        <fieldset className="quality-options"><legend className="quality-legend">Resolution</legend>
+          {resolutions.map((item) => <label key={item.value} className={`quality-option ${draft.resolution === item.value ? 'selected' : ''}`}>
+            <input type="radio" name="resolution" value={item.value} checked={draft.resolution === item.value} onChange={() => pickResolution(item.value)} />
+            <span><strong>{item.label}</strong>{item.value === '2160p' && <span className="recommendation">GPU</span>}<small>{item.detail} · {item.fps.join(' / ')} fps</small></span>
           </label>)}
         </fieldset>
-        <p className="quality-note">Maximum width shown; actual size depends on your display. Rates are targets, not guarantees. Windows presets use variable bitrate. No audio is transmitted.</p>
+        <fieldset className="fps-options"><legend className="quality-legend">Frame rate</legend>
+          {draftResolution.fps.map((fps) => <label key={fps} className={`fps-option ${draft.fps === fps ? 'selected' : ''}`}>
+            <input type="radio" name="fps" value={fps} checked={draft.fps === fps} onChange={() => setDraftQuality(`${draft.resolution}${fps}` as Quality)} />
+            <span>{fps} fps</span>
+          </label>)}
+        </fieldset>
+        <p className="quality-note">{qualityLabel(draftQuality)} · {qualityBitrate[draftQuality]} target. Never upscaled beyond your display; rates are targets, not guarantees. 4K60 needs a GPU encoder on Windows and may fall back to a lower rate on older Macs. No audio is transmitted.</p>
         <div className="advanced">
           <p className="eyebrow">&gt; advanced</p>
           <label className="switch-row"><span><strong>Stats for nerds</strong><small>Live codec, bitrate, frame rate, round-trip time and buffer telemetry. Off by default; saved only in this browser.</small></span>

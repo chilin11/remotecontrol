@@ -44,6 +44,7 @@ export function StatsPanel({ client, quality, onClose }: { client: VideoClient |
   const s = snapshot;
   const rows: [string, string][] = s ? [
     ['Codec', s.codec ? `${s.codec === 'hevc' ? 'HEVC' : 'H.264'} · ${s.codecString ?? ''}` : '—'],
+    ...(s.encoder ? [['Encoder', ({ nvenc: 'NVIDIA NVENC (GPU)', amf: 'AMD AMF (GPU)', qsv: 'Intel Quick Sync (GPU)', software: 'Software (CPU)' } as Record<string, string>)[s.encoder] ?? s.encoder] as [string, string]] : []),
     ['Decoder', s.playback === 'mse' ? 'MediaSource (fMP4)' : 'WebCodecs (hardware preferred)'],
     ['Resolution', s.width ? `${s.width}×${s.height}` : '—'],
     ['Frame rate', `${(rate?.fps ?? 0).toFixed(1)} / ${s.declaredFps} fps`],

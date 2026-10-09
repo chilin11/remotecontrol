@@ -46,7 +46,9 @@ jobs:
       - name: Run Windows and desktop checks
         shell: pwsh
         run: |
-          node --test tests/windows-desktop.test.mjs tests/windows-setup.test.mjs tests/windows-video-limits.test.mjs tests/platform.test.mjs tests/desktop.test.mjs
+          # The parser regression test encodes real H.264/HEVC with the FFmpeg that ships in the package.
+          $env:REMOTECONTROL_TEST_FFMPEG = (Resolve-Path 'release/RemoteControl-Windows/ffmpeg/ffmpeg.exe').Path
+          node --test tests/windows-desktop.test.mjs tests/windows-setup.test.mjs tests/windows-video-limits.test.mjs tests/windows-video-pipeline.test.mjs tests/platform.test.mjs tests/desktop.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Windows tests failed' }
 
       - name: Verify extracted ZIP and SHA-256

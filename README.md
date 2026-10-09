@@ -23,7 +23,7 @@ A browser remote desktop for one computer. The Node gateway listens on LAN by de
 
 ## Windows: H.264 streaming with experimental HEVC
 
-Windows has a native **video** agent in `native/windows/`: FFmpeg `gdigrab` captures the logged-in desktop; `libx264` encodes H.264, and optional `libx265` encodes HEVC. A .NET 8 process relays video and handles mouse/keyboard input. The user has run the H.264 Windows path successfully; the newly added HEVC path still needs Windows browser and performance validation. Both encoders are software-based, not Moonlight-style hardware/game capture.
+Windows has a native **video** agent in `native/windows/`. It defaults to **HEVC** and uses the GPU encoder automatically — NVIDIA NVENC, AMD AMF or Intel Quick Sync — with Desktop Duplication (`ddagrab`) capture on single-display machines; without a usable GPU encoder it falls back to FFmpeg `gdigrab` with software `libx265` / `libx264`. See *GPU encoding* in `native/windows/README.md`. A .NET 8 process relays video and handles mouse/keyboard input. The user has run the H.264 Windows path successfully; the newly added HEVC path still needs Windows browser and performance validation. Both encoders are software-based, not Moonlight-style hardware/game capture.
 
 ### Windows 推荐部署：完整桌面包
 
@@ -51,25 +51,23 @@ Windows captures with FFmpeg `gdigrab`; `libx264` streams H.264 and optional `li
 
 ### Windows limitations
 
-Windows uses FFmpeg/GDI and software `libx264` / `libx265`, not DXGI Desktop Duplication or hardware video encoding. HEVC may use more CPU and add latency at the same frame rate; lower bitrate does not automatically mean clearer video. It does not provide audio, gamepad, file transfer, UAC/secure desktop control, locked-session capture, guaranteed mixed-DPI alignment, or Windows hardware-encoder optimization. The desktop package provides optional per-user login startup and tray operation (not a Session 0 service). See `native/windows/README.md` for protocol and agent limitations.
+GPU encoding needs a current NVIDIA/AMD/Intel driver; multi-display desktops still capture with GDI. Without a GPU encoder, software `libx265` may use more CPU and add latency; lower bitrate does not automatically mean clearer video. The Stats panel shows which encoder is active. It does not provide audio, gamepad, file transfer, UAC/secure desktop control, locked-session capture, guaranteed mixed-DPI alignment, or Windows hardware-encoder optimization. The desktop package provides optional per-user login startup and tray operation (not a Session 0 service). See `native/windows/README.md` for protocol and agent limitations.
 
 ## macOS: native video
 
 The macOS default path uses ScreenCaptureKit and VideoToolbox hardware encoding. Browsers with WebCodecs request **HEVC (H.265) first**, then **H.264** if needed. On LAN HTTP, where WebCodecs is usually unavailable, the browser automatically uses **H.264 MediaSource (MSE)**; no separate desktop client is required. The active codec appears in the header. The native agent preserves the display aspect ratio and does not upscale beyond its actual resolution. Video uses the authenticated WebSocket; no UDP or second public port is needed. Audio and file transfer are not included.
 
-Open Quality, choose a preset, then Apply. Applying a video preset reconnects the stream once; Cancel does not interrupt it. **Balanced · 24 fps** keeps Balanced's resolution while reducing frame rate; **High · 15 fps** keeps High's resolution for sharper, mostly static work with fewer frames. Video has no audio track, so there is no audio bandwidth to disable.
+Open Quality, choose a **resolution** and **frame rate**, then Apply. Applying reconnects the stream once; Cancel does not interrupt it. The resolution is a maximum box: the stream keeps your display's aspect ratio and is never upscaled beyond it.
 
-| Preset | Maximum width | Frame rate | macOS target bitrate | Windows rate control |
-| --- | ---: | ---: | ---: | ---: |
-| Data saver | 1280 px | 24 fps | 1.5 Mbps | Variable |
-| Balanced · 24 fps | Mac 2560 px / Windows 1920 px | 24 fps | 5 Mbps | Variable |
-| Balanced · 30 fps | Mac 2560 px / Windows 1920 px | 30 fps | 6 Mbps | Variable |
-| High · 15 fps | Mac 3840 px / Windows 2560 px | 15 fps | 8 Mbps | Variable |
-| High | Mac 3840 px / Windows 2560 px | Mac 30 / Windows up to 60 fps¹ | 14 Mbps | Variable |
+| Resolution | Frame rates | Target bitrate (GPU / macOS) |
+| --- | --- | ---: |
+| 720p (1280×720) | 30 fps | 4 Mbps |
+| 1080p (1920×1080) | 24 / 30 / 60 fps | 6 / 8 / 12 Mbps |
+| 2160p (3840×2160) | 24 / 30 / 60 fps | 16 / 20 / 35 Mbps |
 
-¹ Windows H.264 is constrained to Level 5.0: 2560×1440 High falls back to 30 fps; unusual tall/large desktops may also be scaled down or use a lower frame rate. The stream metadata reports the actual dimensions and fps. HEVC presets are unchanged.
+The default is 1080p · 30 fps. The codec level is raised automatically (H.264 and HEVC up to 5.2) so 4K keeps its size and frame rate; the stream metadata reports the actual dimensions and fps. 4K60 needs a GPU encoder on Windows and a recent Apple Silicon Mac. Windows software encoding uses constant quality instead of these bitrates. Saved choices from older versions are mapped automatically (Data saver → 720p30, Balanced → 1080p24/30, High · 15 → 2160p24, High → 2160p30).
 
-Bitrates are encoder targets, **not guaranteed network throughput**; WebSocket overhead and bursts remain. Legacy Minimal/Low bandwidth preferences are moved to Data saver so saved clients stay connectable. Public Wi-Fi is untrusted: access over HTTPS or a trusted VPN; do not expose HTTP port 8787 on public networks.
+Bitrates are encoder targets, **not guaranteed network throughput**; WebSocket overhead and bursts remain. Public Wi-Fi is untrusted: access over HTTPS or a trusted VPN; do not expose HTTP port 8787 on public networks.
 
 Requirements: Apple Silicon with macOS 13.5 (Ventura) or newer, Node.js 24 or newer, pnpm, and Apple Command Line Tools with a matching Swift compiler/SDK. Grant Screen Recording and Accessibility permissions to **Remote Control Agent** while physically present.
 
@@ -106,7 +104,7 @@ With a built native agent and owner password configured, `pnpm start` listens on
 - Toolbar buttons provide modifier/special keys, text entry, mobile keyboard, and disconnect.
 - On a Mac video connection, physical Fn/FnLock is not forwarded. To send Fn with a remote key, open **More**, tap **Fn**, then press the desired key; Fn clears automatically after that key. Ordinary `f` remains an ordinary key. Browser/OS-level Fn shortcuts cannot be overridden by this page.
 - **Fullscreen** requests browser fullscreen; if blocked or unavailable, it switches to a near-fullscreen **Theater** view. Use **Exit** or Escape to return. **Fit** shows the entire desktop with letterboxing; **Fill** crops the edges to occupy the viewer. Pointer/touch coordinates follow the visible portion of the image. **Hide controls** keeps an Exit/Show controls bar accessible.
-- Windows HEVC quality presets use CRF/preset tradeoffs (data 27/ultrafast, balanced 25/superfast, high 22/veryfast); see `native/windows/README.md`. H.264 MSE remains the reliable LAN HTTP playback mode.
+- Windows uses the GPU encoder when available; the software fallback uses CRF/preset tradeoffs per resolution (720p 27/ultrafast, 1080p 25/superfast, 2160p 24/ultrafast); see `native/windows/README.md`. H.264 MSE remains the reliable LAN HTTP playback mode.
 - **Disconnect** ends remote control. **Sign out** also revokes the website session.
 - Network interruptions trigger up to three reconnect attempts.
 - Browser video uses WebCodecs or H.264 MediaSource over WebSocket (TCP), not WebRTC. Browser-reserved shortcuts and some keyboard layouts may require the toolbar's text or modifier controls.
