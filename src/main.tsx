@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
-import { VideoClient, type Quality } from './video';
+import { VideoClient, cursorStyle, type Quality } from './video';
 import { StatsPanel } from './StatsPanel';
 import { Arrow, Chart, Dots, Expand, Keyboard, LogOut, Logo, Monitor, Play, Power, Shield, Sliders, TextIcon } from './icons';
 import './style.css';
@@ -100,6 +100,9 @@ function App() {
   const videoRef = useRef<VideoClient | null>(null);
   const mediaRef = useRef<HTMLVideoElement>(null);
   const [videoPlayback, setVideoPlayback] = useState<'canvas' | 'mse'>('canvas');
+  // With a mouse/trackpad the browser draws the pointer itself (zero latency) in the host's current shape;
+  // touch-only devices keep the cursor drawn into the video. Empty = stylesheet default.
+  const [videoCursor, setVideoCursor] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const intentional = useRef(false);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -306,6 +309,8 @@ function App() {
     videoRef.current?.close();
     connectedAt.current = 0;
     setVideoPlayback(typeof VideoDecoder === 'undefined' ? 'mse' : 'canvas');
+    const localCursor = globalThis.matchMedia?.('(any-pointer: fine)').matches === true;
+    setVideoCursor(localCursor ? 'default' : '');
     setStatus('connecting');
     setActiveCodec('');
     setMessage('Starting the video stream…');
@@ -363,8 +368,9 @@ function App() {
         retryTimer.current = setTimeout(() => connectVideo(qualityRef.current, true, forcedCodec), delay);
       }
     }, mediaRef.current);
+    client.onCursor = (cursor) => { if (videoRef.current === client) setVideoCursor(cursorStyle(cursor)); };
     videoRef.current = client;
-    void client.connect(selectedQuality, forcedCodec ?? (hevcVideo ? undefined : 'h264'), hevcCodecString, hevcMseVideo).catch((error) => {
+    void client.connect(selectedQuality, forcedCodec ?? (hevcVideo ? undefined : 'h264'), hevcCodecString, hevcMseVideo, localCursor).catch((error) => {
       if (videoRef.current !== client) return;
       client.close();
       videoRef.current = null;
@@ -628,7 +634,7 @@ function App() {
     </header>
     <section className="stage">
       <div className="viewer" aria-label="Remote desktop">
-        <canvas ref={canvasRef} className="video-canvas" style={{ display: videoPlayback === 'canvas' ? 'block' : 'none' }} tabIndex={0}
+        <canvas ref={canvasRef} className="video-canvas" style={{ display: videoPlayback === 'canvas' ? 'block' : 'none', cursor: videoCursor || undefined }} tabIndex={0}
           aria-label="Remote desktop video"
           onPointerMove={pointerMove} onPointerDown={pointerDown} onPointerUp={pointerUp}
           onPointerCancel={releaseVideoInput} onLostPointerCapture={(event) => { if (touches.current.has(event.pointerId) || pointerStartedHere.current) releaseVideoInput(); }}
@@ -636,7 +642,7 @@ function App() {
           onKeyUp={(event) => videoKey(event, false)}
           onBlur={releaseVideoInput}
           onContextMenu={(event) => event.preventDefault()} />
-        <video ref={mediaRef} className="video-canvas" style={{ display: videoPlayback === 'mse' ? 'block' : 'none' }} tabIndex={0} muted playsInline
+        <video ref={mediaRef} className="video-canvas" style={{ display: videoPlayback === 'mse' ? 'block' : 'none', cursor: videoCursor || undefined }} tabIndex={0} muted playsInline
           aria-label="Remote desktop video"
           onPointerMove={pointerMove} onPointerDown={pointerDown} onPointerUp={pointerUp}
           onPointerCancel={releaseVideoInput} onLostPointerCapture={(event) => { if (touches.current.has(event.pointerId) || pointerStartedHere.current) releaseVideoInput(); }}

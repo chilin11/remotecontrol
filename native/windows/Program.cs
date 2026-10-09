@@ -52,7 +52,8 @@ internal static class Program
                 height = limits.Height;
                 preset = preset with { Fps = limits.Fps, Level = limits.Level };
             }
-            return Agent.RunAsync(preset, screen, width, height).GetAwaiter().GetResult();
+            bool localCursor = args.Skip(2).Contains("local-cursor");
+            return Agent.RunAsync(preset, screen, width, height, localCursor).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
@@ -67,7 +68,7 @@ internal static class Agent
 {
     private const int MaxInputLineChars = 16 * 1024;
 
-    public static async Task<int> RunAsync(QualityPreset preset, Rectangle screen, int width, int height)
+    public static async Task<int> RunAsync(QualityPreset preset, Rectangle screen, int width, int height, bool localCursor = false)
     {
         string ffmpeg = Environment.GetEnvironmentVariable("REMOTECONTROL_FFMPEG_PATH") ?? "ffmpeg.exe";
         if (string.IsNullOrWhiteSpace(ffmpeg))
@@ -83,6 +84,8 @@ internal static class Agent
         // Keep them off the coordinator thread; never await an idle read during shutdown.
         // Start before encoder probing so a disconnect during probing is noticed and probes are killed.
         Task inputTask = Task.Run(() => ReadInput(inputToken, input, inputGate));
+        // Local cursor: the browser draws the pointer; FFmpeg leaves it out and only its shape is sent.
+        if (localCursor) _ = CursorMonitor.RunAsync(inputToken);
         try
         {
             // GPU first (NVIDIA → AMD → Intel), then the same GPU encoder with GDI capture, then CPU encoding.
@@ -113,7 +116,7 @@ internal static class Agent
             {
                 var (backend, useDda) = attempts[index];
                 bool last = index == attempts.Count - 1;
-                var result = await RunPipelineAsync(ffmpeg, backend, preset, screen, width, height, useDda, inputTask);
+                var result = await RunPipelineAsync(ffmpeg, backend, preset, screen, width, height, useDda, !localCursor, inputTask);
                 if (result.InputEnded) return 0;
                 if (result.Error is null) return 0;
                 if (!result.ProducedFrames && !last)
@@ -139,9 +142,9 @@ internal static class Agent
     private sealed record PipelineResult(bool InputEnded, bool ProducedFrames, string? Error);
 
     private static async Task<PipelineResult> RunPipelineAsync(string ffmpeg, EncoderBackend backend, QualityPreset preset,
-        Rectangle screen, int width, int height, bool useDda, Task inputTask)
+        Rectangle screen, int width, int height, bool useDda, bool drawMouse, Task inputTask)
     {
-        using var process = new Process { StartInfo = BuildStartInfo(ffmpeg, backend, preset, screen, width, height, useDda), EnableRaisingEvents = true };
+        using var process = new Process { StartInfo = BuildStartInfo(ffmpeg, backend, preset, screen, width, height, useDda, drawMouse), EnableRaisingEvents = true };
         try
         {
             if (!process.Start()) throw new InvalidOperationException("FFmpeg could not be started.");
@@ -198,7 +201,7 @@ internal static class Agent
         }
     }
 
-    private static ProcessStartInfo BuildStartInfo(string ffmpeg, EncoderBackend backend, QualityPreset preset, Rectangle screen, int width, int height, bool useDda)
+    private static ProcessStartInfo BuildStartInfo(string ffmpeg, EncoderBackend backend, QualityPreset preset, Rectangle screen, int width, int height, bool useDda, bool drawMouse)
     {
         var info = new ProcessStartInfo
         {
@@ -209,7 +212,7 @@ internal static class Agent
             RedirectStandardError = true,
             RedirectStandardInput = false
         };
-        foreach (string argument in FfmpegPipeline.Arguments(backend, preset, screen, width, height, useDda)) info.ArgumentList.Add(argument);
+        foreach (string argument in FfmpegPipeline.Arguments(backend, preset, screen, width, height, useDda, drawMouse)) info.ArgumentList.Add(argument);
         return info;
     }
 

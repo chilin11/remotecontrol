@@ -30,7 +30,7 @@ function fixture(session = async () => ({ authenticated: true })) {
   const values = {
     ...refs, VideoClient: Client, VideoDecoder: Client,
     quality: 'balanced', hevcVideo: true, hevcCodecString: 'hvc1.1.6.L150.B0', hevcMseVideo: true,
-    releaseVideoInput: noop, setVideoPlayback: noop,
+    releaseVideoInput: noop, setVideoPlayback: noop, setVideoCursor: noop, cursorStyle: noop,
     setStatus: (value) => { state.status = value; },
     setActiveCodec: noop, setMessage: noop,
     setPassword: (value) => { state.password = value; },

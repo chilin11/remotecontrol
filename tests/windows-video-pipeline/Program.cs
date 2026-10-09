@@ -96,6 +96,14 @@ foreach (string codec in new[] { "h264", "hevc" })
         }
     }
 }
+// Local cursor: the browser draws the pointer, so neither capture path paints it into the video.
+{
+    var preset = QualityPreset.Parse(["hevc", "1080p30"]);
+    var dda = FfmpegPipeline.Arguments(EncoderBackend.Nvenc, preset, screen, 1920, 1080, true, drawMouse: false);
+    Expect(Value(dda, "-filter_complex").StartsWith("ddagrab=output_idx=0:framerate=30:draw_mouse=0,", StringComparison.Ordinal), "ddagrab without pointer");
+    var gdi = FfmpegPipeline.Arguments(EncoderBackend.Software, preset, screen, 1920, 1080, false, drawMouse: false);
+    Expect(Value(gdi, "-draw_mouse") == "0", "gdigrab without pointer");
+}
 Expect(QualityPreset.Parse([]).Codec == "hevc", "HEVC is the default codec");
 Expect(QualityPreset.Parse(["balanced"]).Codec == "hevc", "HEVC is the default codec with a quality-only argument");
 Expect(QualityPreset.Parse(["h264", "data"]).Codec == "h264", "explicit H.264 is kept");

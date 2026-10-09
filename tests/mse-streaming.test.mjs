@@ -111,6 +111,52 @@ test('WebCodecs absence negotiates H.264 MSE and appends init before fragmented 
   assert.equal(media.src, '');
 });
 
+test('MSE playback chases the live edge instead of keeping a backlog as input lag', async (t) => {
+  installMocks(t);
+  const media = videoElement();
+  media.playbackRate = 1;
+  const client = new VideoClient({ width: 0, height: 0, getContext: () => null }, () => {}, (error) => assert.fail(error), () => {}, media);
+  await client.connect('1080p30');
+  const ws = FakeWebSocket.latest;
+  ws.onmessage({ data: JSON.stringify({ type: 'stream', codec: 'h264', codecString: 'avc1.42E032', width: 640, height: 480, fps: 30, format: 'mse' }) });
+  FakeMediaSource.latest.open();
+  const source = FakeMediaSource.latest.sourceBuffer;
+  const settle = (end) => { source.buffered = { length: 1, start: () => 0, end: () => end }; source.listeners.updateend(); };
+  media.currentTime = 1;
+  settle(1.05);
+  assert.equal(media.playbackRate, 1, 'about one frame behind plays at normal speed');
+  settle(1.2);
+  assert.ok(media.playbackRate > 1 && media.playbackRate <= 1.5, `a small backlog is played slightly faster (${media.playbackRate})`);
+  assert.equal(media.currentTime, 1, 'a small backlog does not seek');
+  settle(1.6);
+  assert.ok(Math.abs(media.currentTime - (1.6 - 1 / 30)) < 1e-9, 'a large backlog jumps to the newest frame');
+  assert.equal(media.playbackRate, 1);
+  client.close();
+});
+
+test('local-cursor streams announce it and accept only well-formed cursor shapes', async (t) => {
+  installMocks(t);
+  const client = new VideoClient({ width: 0, height: 0, getContext: () => null }, () => {}, (error) => assert.fail(error), () => {}, videoElement());
+  const shapes = [];
+  client.onCursor = (cursor) => shapes.push(cursor);
+  await client.connect('1080p30', undefined, undefined, false, true);
+  const ws = FakeWebSocket.latest;
+  ws.onopen();
+  assert.deepEqual(JSON.parse(ws.sent[0]), { type: 'start', codec: 'h264', quality: '1080p30', format: 'mse', cursor: 'local' });
+  const image = 'data:image/png;base64,iVBORw0KGgo=';
+  ws.onmessage({ data: JSON.stringify({ type: 'cursor', image, x: 5, y: 5, scale: 2 }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'cursor', image: 'javascript:alert(1)', x: 5, y: 5, scale: 2 }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'cursor', image: 'data:image/png;base64,AA==") , url("x', x: 5, y: 5, scale: 2 }) });
+  ws.onmessage({ data: JSON.stringify({ type: 'cursor', image, x: 5, y: 5, scale: 0 }) });
+  assert.deepEqual(shapes, [{ image, x: 5, y: 5, scale: 2 }]);
+  client.close();
+  const { cursorStyle } = module.exports;
+  assert.equal(cursorStyle(undefined), 'default');
+  assert.equal(cursorStyle(shapes[0], (value) => value.startsWith('image-set')), `image-set(url("${image}") 2x) 5 5, default`);
+  assert.equal(cursorStyle(shapes[0], (value) => value.startsWith('url')), `url("${image}") 10 10, default`);
+  assert.equal(cursorStyle(shapes[0], () => false), 'default');
+});
+
 test('MSE initialization is queued before sourceopen and keyframe gating drops deltas', async (t) => {
   installMocks(t);
   const media = videoElement();

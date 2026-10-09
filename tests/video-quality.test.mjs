@@ -42,6 +42,18 @@ test('visible quality presets are forwarded as fixed agent arguments', () => {
   }
 });
 
+test('a local-cursor request adds only the fixed local-cursor agent argument', () => {
+  for (const [cursor, expected] of [['local', ['h264', '1080p30', 'local-cursor']], ['remote', ['h264', '1080p30']], ['--help', ['h264', '1080p30']]]) {
+    const handlers = {};
+    const ws = { readyState: 1, sent: [], on(name, callback) { handlers[name] = callback; }, send(value) { this.sent.push(value); }, close(code) { this.code = code; } };
+    module.exports.attachVideo(ws);
+    const before = spawned.length;
+    handlers.message(JSON.stringify({ type: 'start', codec: 'h264', quality: '1080p30', cursor }), false);
+    assert.deepEqual(spawned[before], expected);
+    handlers.close();
+  }
+});
+
 test('invalid or flag-like quality is rejected before spawning an agent', () => {
   for (const quality of ['custom', '--help', '../low', '720p60', '2160p15', 'constructor', '__proto__', null, 600, { fps: 60 }]) {
     const before = spawned.length;

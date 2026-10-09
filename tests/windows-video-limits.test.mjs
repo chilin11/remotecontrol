@@ -12,7 +12,7 @@ const available = spawnSync(dotnet, ['--version'], { encoding: 'utf8' }).status 
 test('Windows H.264 Level 5.0-5.2 limits are applied before capture and metadata', () => {
   const source = readFileSync(new URL('../native/windows/Program.cs', import.meta.url), 'utf8');
   const pipeline = readFileSync(new URL('../native/windows/VideoPipeline.cs', import.meta.url), 'utf8');
-  assert.match(source, /VideoLimits\.H264\(width, height, preset\.Fps\)[\s\S]*?width = limits\.Width;[\s\S]*?height = limits\.Height;[\s\S]*?preset = preset with \{ Fps = limits\.Fps, Level = limits\.Level \};[\s\S]*?Agent\.RunAsync\(preset, screen, width, height\)/);
+  assert.match(source, /VideoLimits\.H264\(width, height, preset\.Fps\)[\s\S]*?width = limits\.Width;[\s\S]*?height = limits\.Height;[\s\S]*?preset = preset with \{ Fps = limits\.Fps, Level = limits\.Level \};[\s\S]*?Agent\.RunAsync\(preset, screen, width, height[,)]/);
   assert.match(source, /codecString = preset\.CodecString/);
   assert.match(source, /fps = preset\.Fps/);
   // Both capture paths (GDI and Desktop Duplication) use the limited frame rate.

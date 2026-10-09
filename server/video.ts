@@ -7,6 +7,8 @@ export const qualities = ['720p30', '1080p24', '1080p30', '1080p60', '2160p24', 
 type Quality = typeof qualities[number];
 // Preset names used by earlier versions, still accepted from cached browsers.
 const legacyQualities: Record<string, Quality> = { minimal: '720p30', low: '720p30', hotel: '720p30', data: '720p30', balanced24: '1080p24', balanced: '1080p30', high15: '2160p24', high: '2160p30' };
+// Encoder bitrate targets (bits/s), mirrored from the agents; they size the send backlog allowed before dropping.
+const qualityBitrate: Record<Quality, number> = { '720p30': 4e6, '1080p24': 6e6, '1080p30': 8e6, '1080p60': 12e6, '2160p24': 16e6, '2160p30': 20e6, '2160p60': 35e6 };
 export function normalizeQuality(value: unknown): Quality | undefined {
   if (typeof value !== 'string') return undefined;
   if ((qualities as readonly string[]).includes(value)) return value as Quality;
@@ -196,6 +198,9 @@ export function attachVideo(ws: WebSocket): void {
   let initialized = false;
   let decodeTime = 0;
   let sequence = 0;
+  // Latency budget for queued video: past ~300 ms of backlog skip to the next keyframe instead of
+  // letting every later frame (and the result of every click) arrive late. Floor fits one keyframe.
+  let dropBacklog = 2_000_000;
   // Stats for nerds counters; reported only when the browser asks with {type:'stats'}.
   const openedAt = Date.now();
   const counters = { framesIn: 0, framesSent: 0, framesDropped: 0, bytesSent: 0, keyframes: 0 };
@@ -299,9 +304,9 @@ export function attachVideo(ws: WebSocket): void {
     counters.framesIn++;
     if (flowPaused) { counters.framesDropped++; return; }
     const key = payload[0] === 1;
-    if (ws.bufferedAmount > 2_000_000) waitingForKey = true;
+    if (ws.bufferedAmount > dropBacklog) waitingForKey = true;
     if (waitingForKey) {
-      if (!key || ws.bufferedAmount > 512_000) { counters.framesDropped++; return; }
+      if (!key || ws.bufferedAmount > dropBacklog / 4) { counters.framesDropped++; return; }
       waitingForKey = false;
     }
     const before = ws.bufferedAmount;
@@ -360,8 +365,12 @@ export function attachVideo(ws: WebSocket): void {
         return;
       }
       started = true;
+      dropBacklog = Math.max(256_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.3));
+      // Local cursor: the browser draws the pointer with no round trip; the agent hides it from the video
+      // and reports its shape instead.
+      const agentArgs = [codec as Codec, selectedQuality, ...(event.cursor === 'local' ? ['local-cursor'] : [])];
       const scriptAgent = agentPath.endsWith('.mjs');
-      child = spawn(scriptAgent ? process.execPath : agentPath, scriptAgent ? [agentPath, codec as Codec, selectedQuality] : [codec as Codec, selectedQuality], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      child = spawn(scriptAgent ? process.execPath : agentPath, scriptAgent ? [agentPath, ...agentArgs] : agentArgs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
       const capture = child;
       captures.add(capture);
       capture.once('close', () => captures.delete(capture));

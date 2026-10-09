@@ -111,16 +111,17 @@ internal static class FfmpegPipeline
     /// <summary>
     /// Full FFmpeg command line. A single display with a GPU encoder captures with Desktop Duplication
     /// (ddagrab) and scales on the GPU; multi-display desktops keep gdigrab so the whole virtual screen
-    /// still matches pointer mapping.
+    /// still matches pointer mapping. <paramref name="drawMouse"/> is false when the browser draws the pointer locally.
     /// </summary>
-    public static List<string> Arguments(EncoderBackend backend, QualityPreset preset, Rectangle screen, int width, int height, bool singleDisplay)
+    public static List<string> Arguments(EncoderBackend backend, QualityPreset preset, Rectangle screen, int width, int height, bool singleDisplay, bool drawMouse = true)
     {
         string fps = preset.Fps.ToString(CultureInfo.InvariantCulture);
+        string mouse = drawMouse ? "1" : "0";
         var args = new List<string> { "-hide_banner", "-loglevel", "warning", "-nostats", "-nostdin" };
         if (backend != EncoderBackend.Software && singleDisplay)
         {
             // Frames stay in GPU memory: capture, BGRA->NV12 and scaling run on the D3D11 video processor.
-            string filter = $"ddagrab=output_idx=0:framerate={fps}:draw_mouse=1,scale_d3d11=width={width}:height={height}:format=nv12";
+            string filter = $"ddagrab=output_idx=0:framerate={fps}:draw_mouse={mouse},scale_d3d11=width={width}:height={height}:format=nv12";
             // QSV takes system-memory NV12 most reliably; one GPU download of NV12 is still far cheaper than GDI capture.
             if (backend == EncoderBackend.Qsv) filter += ",hwdownload,format=nv12";
             args.AddRange(["-filter_complex", filter]);
@@ -128,7 +129,7 @@ internal static class FfmpegPipeline
         else
         {
             args.AddRange([
-                "-f", "gdigrab", "-framerate", preset.Fps.ToString(CultureInfo.InvariantCulture), "-draw_mouse", "1",
+                "-f", "gdigrab", "-framerate", preset.Fps.ToString(CultureInfo.InvariantCulture), "-draw_mouse", mouse,
                 "-video_size", $"{screen.Width}x{screen.Height}",
                 "-offset_x", screen.Left.ToString(CultureInfo.InvariantCulture), "-offset_y", screen.Top.ToString(CultureInfo.InvariantCulture), "-i", "desktop",
                 "-an", "-vf", $"scale={width}:{height}:flags=fast_bilinear" + (backend == EncoderBackend.Software ? "" : ",format=nv12")

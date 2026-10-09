@@ -8,6 +8,8 @@ import ApplicationServices
 
 private let codecName = CommandLine.arguments.dropFirst().first ?? "hevc"
 private let qualityName = CommandLine.arguments.dropFirst(2).first ?? "1080p30"
+// Local cursor: the browser draws the pointer itself, so keep it out of the video and report its shape.
+private let localCursor = CommandLine.arguments.dropFirst(3).contains("local-cursor")
 private let codecType: CMVideoCodecType = codecName == "h264" ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC
 
 private struct Quality {
@@ -106,7 +108,7 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         config.height = height
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(quality.fps))
         config.queueDepth = 3
-        config.showsCursor = true
+        config.showsCursor = !localCursor
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "remotecontrol.capture"))
@@ -115,6 +117,42 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         writer.json(["type": "stream", "codec": codecName, "codecString": codecString, "width": width, "height": height, "fps": quality.fps])
         try await stream.startCapture()
         DispatchQueue.global(qos: .userInteractive).async { self.readInput() }
+        if localCursor { startCursorUpdates() }
+    }
+
+    private var cursorTimer: DispatchSourceTimer?
+    private var lastCursorSignature: Int?
+
+    /// Polls the system cursor (AppKit, so on the main queue) and sends its shape when it changes.
+    private func startCursorUpdates() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(50), leeway: .milliseconds(10))
+        timer.setEventHandler { [weak self] in self?.sendCursorIfChanged() }
+        timer.resume()
+        cursorTimer = timer
+    }
+
+    private func sendCursorIfChanged() {
+        guard let cursor = NSCursor.currentSystem else { return }
+        let size = cursor.image.size
+        guard size.width >= 1, size.height >= 1, size.width <= 128, size.height <= 128 else { return }
+        // Render at 2x so the browser can show it sharply on Retina screens; the bitmap doubles as the change signature.
+        let scale = 2.0
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int((size.width * scale).rounded()), pixelsHigh: Int((size.height * scale).rounded()), bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 32), let pixels = rep.bitmapData else { return }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        cursor.image.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+        var hasher = Hasher()
+        hasher.combine(bytes: UnsafeRawBufferPointer(start: pixels, count: rep.bytesPerRow * rep.pixelsHigh))
+        hasher.combine(cursor.hotSpot.x)
+        hasher.combine(cursor.hotSpot.y)
+        let signature = hasher.finalize()
+        guard signature != lastCursorSignature, let png = rep.representation(using: .png, properties: [:]) else { return }
+        lastCursorSignature = signature
+        // hotSpot is measured from the top-left corner in points, which is what CSS expects.
+        writer.json(["type": "cursor", "image": "data:image/png;base64," + png.base64EncodedString(), "x": Double(cursor.hotSpot.x), "y": Double(cursor.hotSpot.y), "scale": scale])
     }
 
     private func makeEncoder() throws {

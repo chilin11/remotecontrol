@@ -14,6 +14,30 @@ export function sameCodecFamily(expected: string | undefined, actual: unknown): 
 type Codec = 'hevc' | 'h264';
 type Playback = 'canvas' | 'mse';
 type StreamInfo = { codec: Codec; codecString: string; width: number; height: number; fps?: number; format?: string; encoder?: string };
+/** Remote pointer shape: a PNG at `scale` device pixels per CSS pixel, hotspot in CSS pixels. */
+export type RemoteCursor = { image: string; x: number; y: number; scale: number };
+
+export function parseRemoteCursor(message: Record<string, unknown>): RemoteCursor | undefined {
+  const { image, x, y, scale } = message;
+  if (typeof image !== 'string' || image.length > 262_144 || !/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(image)) return;
+  if (typeof x !== 'number' || typeof y !== 'number' || typeof scale !== 'number') return;
+  if (!(scale >= 1 && scale <= 4) || !(x >= 0 && x <= 256) || !(y >= 0 && y <= 256)) return;
+  return { image, x, y, scale };
+}
+
+/** CSS `cursor` value for a remote shape, falling back to the plain arrow where image cursors are unsupported. */
+export function cursorStyle(cursor: RemoteCursor | undefined, supports: (value: string) => boolean = (value) => CSS.supports('cursor', value)): string {
+  if (!cursor) return 'default';
+  const x = Math.round(cursor.x), y = Math.round(cursor.y);
+  const url = `url("${cursor.image}")`;
+  const candidates = [
+    `image-set(${url} ${cursor.scale}x) ${x} ${y}, default`,
+    `-webkit-image-set(${url} ${cursor.scale}x) ${x} ${y}, default`,
+    // Older engines: unscaled image, hotspot in its pixels.
+    `${url} ${Math.round(cursor.x * cursor.scale)} ${Math.round(cursor.y * cursor.scale)}, default`,
+  ];
+  return candidates.find((value) => { try { return supports(value); } catch { return false; } }) ?? 'default';
+}
 
 export class VideoClient {
   private ws?: WebSocket;
@@ -59,6 +83,9 @@ export class VideoClient {
   private rttMinMs?: number;
   private serverStats?: ServerStats;
 
+  /** Called when the host reports a new pointer shape (local-cursor streams only). */
+  onCursor?: (cursor: RemoteCursor) => void;
+
   get activeCodec(): Codec | undefined { return this.codec; }
   get renderMode(): Playback { return this.playback; }
 
@@ -94,7 +121,7 @@ export class VideoClient {
     private video?: HTMLVideoElement,
   ) {}
 
-  async connect(quality: Quality, forcedCodec?: Codec, hevcCodecString = 'hvc1.1.6.L150.B0', hevcMseVideo = false): Promise<void> {
+  async connect(quality: Quality, forcedCodec?: Codec, hevcCodecString = 'hvc1.1.6.L150.B0', hevcMseVideo = false, localCursor = false): Promise<void> {
     let choice: { codec: Codec; codecString: string } | undefined;
     if (typeof VideoDecoder !== 'undefined') {
       const candidates: { codec: Codec; codecString: string }[] = [
@@ -138,7 +165,7 @@ export class VideoClient {
       this.lastReceived = this.lastPong;
       this.lastHeartbeatTick = this.lastPong;
       this.connectedAt = this.lastPong;
-      ws.send(JSON.stringify({ type: 'start', codec: choice!.codec, quality, ...(this.playback === 'mse' ? { format: 'mse' } : {}) }));
+      ws.send(JSON.stringify({ type: 'start', codec: choice!.codec, quality, ...(this.playback === 'mse' ? { format: 'mse' } : {}), ...(localCursor ? { cursor: 'local' } : {}) }));
       this.ping();
       this.startupTimer = setTimeout(() => {
         if (!this.ready && !this.stopped) this.onError(`${this.codec === 'hevc' ? 'HEVC' : 'H.264'} decoding failed to start.`);
@@ -163,6 +190,7 @@ export class VideoClient {
           if (message.type === 'pong') { this.recordPong(); return; }
           if (message.type === 'stats') { this.serverStats = parseServerStats(message) ?? this.serverStats; return; }
           if (message.type === 'error') { this.onError(message.message || 'Capture failed.'); return; }
+          if (message.type === 'cursor') { const cursor = parseRemoteCursor(message); if (cursor) this.onCursor?.(cursor); return; }
           if (message.type === 'stream') this.configureStream(message as StreamInfo);
         } catch { this.onError('Video decoder could not start.'); }
       } else if (event.data instanceof ArrayBuffer) {
@@ -313,10 +341,21 @@ export class VideoClient {
   }
 
   private trimMseBuffer(source: SourceBuffer): void {
-    if (!this.video || source.updating || !source.buffered.length) return;
+    const video = this.video;
+    if (!video || source.updating || !source.buffered.length) return;
     const end = source.buffered.end(source.buffered.length - 1);
-    if (end - this.video.currentTime > 0.75) this.video.currentTime = Math.max(0, end - 0.15);
-    const removeBefore = this.video.currentTime - 2;
+    // MSE plays at 1x, so any burst (Wi-Fi hiccup, large keyframe) would otherwise stay as permanent
+    // input lag. Hold the play head ~2 frames behind the newest frame: catch up gently, jump when far behind.
+    const frame = 1 / this.fps;
+    const lag = end - video.currentTime;
+    let rate = video.playbackRate;
+    if (lag > Math.max(0.35, 8 * frame)) {
+      video.currentTime = Math.max(0, end - frame);
+      rate = 1;
+    } else if (lag > Math.max(0.08, 3 * frame)) rate = Math.min(1.5, 1 + lag);
+    else if (lag < Math.max(0.05, 1.5 * frame)) rate = 1;
+    if (video.playbackRate !== rate) video.playbackRate = rate;
+    const removeBefore = video.currentTime - 2;
     if (removeBefore > 0 && source.buffered.start(0) < removeBefore) {
       try { source.remove(source.buffered.start(0), Math.min(removeBefore, end)); } catch { /* range was already evicted */ }
     }
@@ -427,6 +466,7 @@ export class VideoClient {
     if (this.video) {
       if (this.mediaErrorHandler) { this.video.removeEventListener('error', this.mediaErrorHandler); this.mediaErrorHandler = undefined; }
       this.video.pause();
+      this.video.playbackRate = 1;
       this.video.removeAttribute('src');
       this.video.load();
     }
