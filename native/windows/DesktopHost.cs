@@ -55,20 +55,21 @@ internal sealed class DesktopWindow : Form
     private readonly Label passwordState = TextLabel("正在读取现有设置…");
     private readonly Label readinessState = TextLabel("尚未检查 FFmpeg 和交互桌面。");
     private readonly Label serviceState = TextLabel("服务未启动；默认仅本机访问。");
-    private readonly Label errorState = TextLabel("");
-    private readonly TextBox addresses = new() { ReadOnly = true, Multiline = true, Width = 720, Height = 65, Dock = DockStyle.Top, ScrollBars = ScrollBars.Vertical };
+    private readonly Label errorState = new NoticeBanner();
+    private readonly TextBox addresses = new() { ReadOnly = true, Multiline = true, Width = 720, Height = 65, ScrollBars = ScrollBars.None, WordWrap = false };
     private readonly CheckBox lan = new() { Text = "允许可信私有局域网访问（保存后下次沿用）", AutoSize = true };
     private readonly CheckBox startup = new() { Text = "开机后登录当前用户时自动启动（后台托盘）", AutoSize = true };
     private readonly Label startupState = TextLabel("");
-    private readonly Button setup = MakeButton("保存密码并启动");
+    private readonly Button setup = MakeButton("保存密码并启动", Theme.ButtonKind.Primary);
     private readonly Button check = MakeButton("检查并自动修复");
-    private readonly Button start = MakeButton("启动服务");
-    private readonly Button stop = MakeButton("停止服务");
+    private readonly Button start = MakeButton("启动服务", Theme.ButtonKind.Primary);
+    private readonly Button stop = MakeButton("停止服务", Theme.ButtonKind.Danger);
     private readonly Button browser = MakeButton("打开浏览器");
     private readonly Button logs = MakeButton("查看日志");
     private readonly Button firewall = MakeButton("申请私有网络权限（UAC）");
     private readonly Button hide = MakeButton("隐藏到托盘");
     private readonly NotifyIcon tray = new();
+    private readonly StatusPill statusPill = new();
     private readonly ToolStripMenuItem trayStart = new("启动服务");
     private readonly ToolStripMenuItem trayStop = new("停止服务");
     private readonly System.Windows.Forms.Timer activationTimer = new() { Interval = 500 };
@@ -97,41 +98,49 @@ internal sealed class DesktopWindow : Form
         this.activation = activation;
         Text = "远程控制 · Windows";
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!);
-        ClientSize = new Size(790, 780);
-        MinimumSize = new Size(700, 680);
+        ClientSize = new Size(800, 820);
+        MinimumSize = new Size(640, 560);
         StartPosition = FormStartPosition.CenterScreen;
-        Font = new Font("Microsoft YaHei UI", 10);
+        Font = Theme.Body;
+        BackColor = Theme.Background;
+        ForeColor = Theme.Text;
+        foreach (var box in new[] { password, confirmation, addresses }) Theme.StyleTextBox(box);
+        addresses.Font = Theme.Mono;
+        Theme.StyleCheckBox(lan);
+        Theme.StyleCheckBox(startup);
         logPath = Path.Combine(dataDir, "desktop.log");
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(12) };
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 29));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 35));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 6));
-        Controls.Add(layout);
+        var page = new StackPage();
+        Controls.Add(page);
+        // Added after the fill page so it docks first and stays on top.
+        Controls.Add(BuildHeader());
 
-        var first = Step("1 · 访问密码（已有密码不会被覆盖）");
-        first.Controls.Add(passwordState);
-        first.Controls.Add(InputRow("密码（12–256 个字符）", password));
-        first.Controls.Add(InputRow("再次输入密码", confirmation));
-        first.Controls.Add(Buttons(setup));
-        layout.Controls.Add(first.Parent!, 0, 0);
-        var second = Step("2 · 权限与运行条件");
-        second.Controls.Add(TextLabel("自动检查屏幕采集和桌面条件，无需录屏/辅助功能授权。局域网防火墙只需一次 Windows 管理员确认；应用本身以普通用户运行。锁屏、UAC 安全桌面和管理员窗口不支持远控。"));
-        second.Controls.Add(readinessState);
-        second.Controls.Add(Buttons(check, firewall));
-        second.Controls.Add(TextLabel("仅允许 TCP 8787、Private、LocalSubnet，不开放公共网络。请在 Windows 设置中将可信网络设为“专用”；公司策略或路由隔离仍可能阻止连接。"));
-        layout.Controls.Add(second.Parent!, 0, 1);
-        var third = Step("3 · 启动与访问");
-        third.Controls.Add(lan);
-        third.Controls.Add(startup);
-        third.Controls.Add(startupState);
-        third.Controls.Add(serviceState);
-        third.Controls.Add(Buttons(start, stop, browser, logs, hide));
-        third.Controls.Add(addresses);
-        third.Controls.Add(TextLabel("本机：" + LocalUrl + "　关闭窗口仅隐藏到托盘；彻底退出请用托盘菜单。"));
-        layout.Controls.Add(third.Parent!, 0, 2);
-        errorState.ForeColor = Color.Firebrick;
-        layout.Controls.Add(errorState, 0, 3);
+        page.Add(errorState);
+        var first = new Card(1, "访问密码", "已有密码不会被覆盖");
+        first.Body.Controls.Add(passwordState);
+        first.Body.Controls.Add(InputRow("密码", password, "12–256 个字符"));
+        first.Body.Controls.Add(InputRow("确认密码", confirmation, "再次输入相同密码"));
+        first.Body.Controls.Add(Buttons(setup));
+        page.Add(first);
+        var second = new Card(2, "权限与运行条件", "自动检查，无需录屏授权");
+        second.Body.Controls.Add(readinessState);
+        second.Body.Controls.Add(Buttons(check, firewall));
+        second.Body.Controls.Add(Hint("自动检查屏幕采集和桌面条件，无需录屏/辅助功能授权。局域网防火墙只需一次 Windows 管理员确认；应用本身以普通用户运行。锁屏、UAC 安全桌面和管理员窗口不支持远控。"));
+        second.Body.Controls.Add(Hint("仅允许 TCP 8787、Private、LocalSubnet，不开放公共网络。请在 Windows 设置中将可信网络设为“专用”；公司策略或路由隔离仍可能阻止连接。"));
+        page.Add(second);
+        var third = new Card(3, "启动与访问", "关闭窗口仅隐藏到托盘");
+        third.Body.Controls.Add(serviceState);
+        third.Body.Controls.Add(Buttons(start, stop, browser, logs, hide));
+        third.Body.Controls.Add(lan);
+        third.Body.Controls.Add(startup);
+        third.Body.Controls.Add(startupState);
+        third.Body.Controls.Add(AddressPanel());
+        third.Body.Controls.Add(Hint("本机：" + LocalUrl + "　关闭窗口仅隐藏到托盘；彻底退出请用托盘菜单。"));
+        page.Add(third);
+        errorState.Margin = Padding.Empty;
+        startupState.ForeColor = Theme.MutedText;
+        startupState.Font = Theme.Small;
+        serviceState.Font = Theme.Strong;
+        passwordState.ForeColor = readinessState.ForeColor = Theme.MutedText;
 
         setup.Click += (_, _) => SavePassword();
         check.Click += async (_, _) => await RecoverAndCheck();
@@ -252,21 +261,113 @@ internal sealed class DesktopWindow : Form
         Send(new { action = "start", lan = allowLan }, "start");
     }
 
-    private static Label TextLabel(string text) => new() { Text = text, AutoSize = true, MaximumSize = new Size(730, 0), Margin = new Padding(4, 3, 4, 3) };
-    private static Button MakeButton(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(4), Padding = new Padding(5, 2, 5, 2) };
+    private Control BuildHeader()
+    {
+        var header = new Panel { Dock = DockStyle.Top, Height = LogicalToDeviceUnits(76), BackColor = Theme.Surface, Padding = new Padding(20, 0, 20, 0) };
+        header.Paint += (_, e) =>
+        {
+            using var pen = new Pen(Theme.Border);
+            e.Graphics.DrawLine(pen, 0, header.Height - 1, header.Width, header.Height - 1);
+        };
+        var icon = new PictureBox
+        {
+            Image = (Icon ?? SystemIcons.Application).ToBitmap(),
+            SizeMode = PictureBoxSizeMode.Zoom,
+            Size = new Size(LogicalToDeviceUnits(40), LogicalToDeviceUnits(40)),
+            Margin = new Padding(0, 0, 12, 0),
+        };
+        var titles = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, BackColor = Theme.Surface, Margin = Padding.Empty };
+        titles.Controls.Add(new Label { Text = "远程控制", Font = Theme.Title, ForeColor = Theme.Text, AutoSize = true, Margin = Padding.Empty });
+        titles.Controls.Add(new Label { Text = "在浏览器中查看并控制这台 Windows 电脑", Font = Theme.Small, ForeColor = Theme.MutedText, AutoSize = true, Margin = new Padding(1, 0, 0, 0) });
+        var left = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, BackColor = Theme.Surface, Margin = Padding.Empty };
+        left.Controls.Add(icon);
+        left.Controls.Add(titles);
+        header.Controls.Add(left);
+        header.Controls.Add(statusPill);
+        void Arrange()
+        {
+            int h = header.Height;
+            icon.Margin = new Padding(0, Math.Max(0, (titles.Height - icon.Height) / 2), 12, 0);
+            left.Location = new Point(header.Padding.Left, Math.Max(0, (h - left.Height) / 2));
+            statusPill.Location = new Point(header.ClientSize.Width - header.Padding.Right - statusPill.Width, (h - statusPill.Height) / 2);
+        }
+        header.Resize += (_, _) => Arrange();
+        statusPill.Resize += (_, _) => Arrange();
+        left.Resize += (_, _) => Arrange();
+        return header;
+    }
+
+    // Light grey well around the read-only address box; shows a placeholder
+    // when the service is stopped so the box never looks broken while empty.
+    private Panel AddressPanel()
+    {
+        var well = new Panel { BackColor = Color.FromArgb(246, 247, 250), Padding = new Padding(12, 8, 12, 8), Margin = new Padding(0, 8, 0, 6), Height = 104, Width = 720 };
+        var caption = new Label { Text = "访问地址", Font = Theme.Small, ForeColor = Theme.MutedText, AutoSize = true, Dock = DockStyle.Top, BackColor = well.BackColor };
+        var placeholder = new Label { Text = "服务启动后会在这里显示访问地址", Font = Theme.Body, ForeColor = Theme.Neutral, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, BackColor = well.BackColor };
+        addresses.BorderStyle = BorderStyle.None;
+        addresses.BackColor = well.BackColor;
+        addresses.ForeColor = Theme.Accent;
+        addresses.Dock = DockStyle.Fill;
+        addresses.Margin = Padding.Empty;
+        well.Controls.Add(addresses);
+        well.Controls.Add(placeholder);
+        well.Controls.Add(caption);
+        well.Paint += (_, e) =>
+        {
+            using var pen = new Pen(Theme.Border);
+            e.Graphics.DrawRectangle(pen, 0, 0, well.Width - 1, well.Height - 1);
+        };
+        void Sync()
+        {
+            bool empty = addresses.TextLength == 0;
+            placeholder.Visible = empty;
+            addresses.Visible = !empty;
+            // One line per address plus the caption; long LAN lists scroll.
+            int lines = Math.Max(1, addresses.Lines.Length);
+            int lineHeight = TextRenderer.MeasureText("8", addresses.Font).Height;
+            addresses.ScrollBars = lines > 4 ? ScrollBars.Vertical : ScrollBars.None;
+            well.Height = well.Padding.Vertical + caption.Height + 4 + lineHeight * Math.Min(4, lines) + 4;
+        }
+        addresses.TextChanged += (_, _) => Sync();
+        Sync();
+        return well;
+    }
+
+    private static Label TextLabel(string text) => new() { Text = text, AutoSize = true, MaximumSize = new Size(730, 0), Margin = new Padding(0, 3, 0, 5) };
+    private static Label Hint(string text)
+    {
+        var label = TextLabel(text);
+        label.Font = Theme.Small;
+        label.ForeColor = Theme.MutedText;
+        return label;
+    }
+    private static Button MakeButton(string text, Theme.ButtonKind kind = Theme.ButtonKind.Secondary) => Theme.MakeButton(text, kind);
     private static FlowLayoutPanel Buttons(params Control[] items)
     {
-        var panel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, WrapContents = true };
+        var panel = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = new Padding(0, 4, 0, 6), BackColor = Theme.Surface };
         panel.Controls.AddRange(items);
         return panel;
     }
-    private static FlowLayoutPanel InputRow(string title, TextBox input) => Buttons(TextLabel(title), input);
-    private static FlowLayoutPanel Step(string title)
+    private static FlowLayoutPanel InputRow(string title, TextBox input, string hint)
     {
-        var group = new GroupBox { Text = title, Dock = DockStyle.Fill, Padding = new Padding(8) };
-        var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
-        group.Controls.Add(flow);
-        return flow;
+        // Same width for every caption (measured, so it survives DPI/font scaling).
+        int captionWidth = TextRenderer.MeasureText("确认密码", Theme.Strong).Width + 8;
+        var caption = new Label { Text = title, AutoSize = false, Width = captionWidth, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, 4, 8, 4), Font = Theme.Strong };
+        input.Margin = new Padding(0, 4, 10, 4);
+        var note = new Label { Text = hint, AutoSize = true, Font = Theme.Small, ForeColor = Theme.MutedText, Margin = new Padding(0, 4, 0, 4) };
+        var row = Buttons(caption, input, note);
+        row.Margin = new Padding(0, 2, 0, 2);
+        // Keep caption and hint vertically centred on the text box once sizes are known.
+        void Align()
+        {
+            if (caption.Height != input.Height) caption.Height = input.Height;
+            var margin = new Padding(0, 4 + Math.Max(0, (input.Height - note.Height) / 2), 0, 4);
+            if (note.Margin != margin) note.Margin = margin;
+        }
+        input.SizeChanged += (_, _) => Align();
+        note.SizeChanged += (_, _) => Align();
+        Align();
+        return row;
     }
 
     private void RefreshControls()
@@ -284,6 +385,11 @@ internal sealed class DesktopWindow : Form
         trayStart.Enabled = start.Enabled;
         trayStop.Enabled = stop.Enabled;
         tray.Text = running ? "远程控制 · 后台运行" : "远程控制 · 服务未运行";
+        if (running) statusPill.Set(lan.Checked ? "运行中 · 局域网" : "运行中 · 仅本机", Theme.Success);
+        else if (busy || preparing || starting || checking || configuringFirewall) statusPill.Set("正在处理…", Theme.Accent);
+        else if (controller is null) statusPill.Set("服务不可用", Theme.Danger);
+        else if (!configured) statusPill.Set("等待设置密码", Theme.Warning);
+        else statusPill.Set("服务已停止", Theme.Neutral);
         passwordState.Text = configured ? "已有访问密码，已保留。请使用原密码登录；此向导不会重置密码。" : "首次使用请设置两次相同密码（12–256 个字符）。";
     }
 
