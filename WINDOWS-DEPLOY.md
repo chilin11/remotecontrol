@@ -2,6 +2,14 @@
 
 统一使用 **RemoteControl.exe 桌面版**，不需要保持终端或设置窗口打开。当前仓库根目录的旧 `remotecontrol-windows-deploy.zip` 是命令行旧包，不包含新的托盘/自启动功能；不要混用。
 
+## 直接下载云端构建的安装包（无需本机编译）
+
+登录有仓库权限的 GitHub 账号，打开仓库 **Actions → Build Windows desktop ZIP**，进入最近一次成功构建，在页面下方 **Artifacts** 下载 `Windows-desktop-x64`。下载文件外面有一层 GitHub ZIP：先解压它，再完整解压里面的 `RemoteControl-windows-x64.zip`，然后按下面“首次设置”双击 `RemoteControl.exe`。安装电脑无需 Node / .NET / pnpm / FFmpeg。
+
+如需重建最新版，在该工作流页面点击 **Run workflow**，选择 `main`。GitHub 的 Windows 构建机会自动构建、校验并上传安装包（保留 30 天）。此流程不签署 Windows Authenticode，Windows SmartScreen 可能显示未知发布者；仅使用本仓库可信构建，不关闭系统安全策略。
+
+**Code → Download ZIP 是源码，不是安装包。** 云端检查覆盖编译、C# 测试、ZIP 完整性和内置运行时；托盘、UAC、登录自启及实际屏幕/输入仍需 Windows 真机验证。
+
 ## 1. 构建完整桌面包
 
 在 Windows 构建机准备 Node 24、pnpm、.NET 8 SDK 即可，**无需手动安装 FFmpeg 或准备分发目录**：

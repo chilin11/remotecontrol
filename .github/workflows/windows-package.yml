@@ -1,0 +1,81 @@
+name: Build Windows desktop ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.14.1'
+
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          npm install --global pnpm@10.28.2
+          if ($LASTEXITCODE -ne 0) { throw 'pnpm installation failed' }
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+
+      - name: Build complete Windows desktop package
+        shell: pwsh
+        run: |
+          pnpm package:windows
+          if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
+
+      - name: Run Windows and desktop checks
+        shell: pwsh
+        run: |
+          node --test tests/windows-desktop.test.mjs tests/windows-setup.test.mjs tests/windows-video-limits.test.mjs tests/platform.test.mjs tests/desktop.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Windows tests failed' }
+
+      - name: Verify extracted ZIP and SHA-256
+        shell: pwsh
+        run: |
+          $zip = 'release/RemoteControl-windows-x64.zip'
+          $expected = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'Package SHA-256 mismatch' }
+          $verify = Join-Path $env:RUNNER_TEMP 'remotecontrol-zip-check'
+          Expand-Archive -LiteralPath $zip -DestinationPath $verify
+          $root = Join-Path $verify 'RemoteControl-Windows'
+          foreach ($file in @('RemoteControl.exe', 'runtime/node.exe', 'ffmpeg/ffmpeg.exe', 'ffmpeg/THIRD-PARTY.txt', 'dist/index.html', 'dist-server/desktop.js', 'node_modules/ws/package.json', 'node_modules/@node-rs/argon2-win32-x64-msvc/package.json', 'WINDOWS-DEPLOY.md')) {
+            if (-not (Test-Path (Join-Path $root $file) -PathType Leaf)) { throw "Missing ZIP component: $file" }
+          }
+          Push-Location $root
+          try {
+            & './runtime/node.exe' --input-type=module -e "import {hash,verify} from '@node-rs/argon2'; import WebSocket from 'ws'; import {DatabaseSync} from 'node:sqlite'; const h=await hash('zip-validation'); if(!await verify(h,'zip-validation')) throw Error('argon2 failed'); new DatabaseSync(':memory:').close(); console.log('Extracted ZIP runtime OK',process.version,typeof WebSocket);"
+            if ($LASTEXITCODE -ne 0) { throw 'Extracted ZIP runtime check failed' }
+          } finally { Pop-Location }
+          "## Windows desktop ZIP ready`n`nSource commit: $env:GITHUB_SHA`n`nSHA-256: $actual`n`nDownload the Windows-desktop-x64 artifact below, unzip it, then extract RemoteControl-windows-x64.zip and open RemoteControl.exe. No Node/.NET/FFmpeg installation is needed on the target PC. Interactive desktop, tray, UAC, and login startup still need real-PC verification." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload installable ZIP
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Windows-desktop-x64
+          path: |
+            release/RemoteControl-windows-x64.zip
+            release/RemoteControl-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
