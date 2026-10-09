@@ -6,7 +6,7 @@
 
 登录有仓库权限的 GitHub 账号，打开仓库 **Releases → Latest**，在 **Assets** 下载 `RemoteControl-windows-x64.zip`（不要下载 Source code）。完整解压到固定目录，然后按下面“首次设置”双击 `RemoteControl.exe`。安装电脑无需 Node / .NET / pnpm / FFmpeg。Release 附件不会像 Actions 临时产物那样在 30 天后过期。
 
-如需重建最新版，在 **Actions → Build Windows desktop ZIP** 点击 **Run workflow**，选择 `main`。GitHub 的 Windows 构建机会自动构建、校验，并在全部检查通过后创建独立标签、上传 ZIP 与 SHA-256 文件、发布为 Latest。旧 Release 保留。此流程不签署 Windows Authenticode，Windows SmartScreen 可能显示未知发布者；仅使用本仓库可信构建，不关闭系统安全策略。
+如需重建最新版，在 **Actions → Build and publish macOS + Windows** 点击 **Run workflow**，选择 `main`。云端使用同一提交分别构建 macOS / Windows；两边全部检查通过后，才在同一个 Release 上传 Mac DMG/ZIP、Windows ZIP 及各自 SHA-256 文件，并发布为 Latest。旧 Release 保留。Windows 不签署 Authenticode，SmartScreen 可能显示未知发布者；仅使用本仓库可信构建，不关闭系统安全策略。
 
 Actions 的 `Windows-desktop-x64` 产物仍保留 30 天作备用；它外面有一层 GitHub ZIP，需要先解压外层，再解压里面的安装包。
 

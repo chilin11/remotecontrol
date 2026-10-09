@@ -2,6 +2,12 @@
 
 桌面包复用 Swift / WinForms 原生程序，不依赖 Electron。双击进入本机设置窗口；视频子进程使用同一可执行文件。成品随包包含官方 Node 24.14.1、网站、网关和平台匹配的运行依赖，无需目标电脑安装 Node / pnpm / .NET。
 
+## GitHub 双平台发布
+
+登录仓库后在 **Releases → Latest → Assets** 下载：Mac 选 `RemoteControl-mac-arm64.dmg`（可选 ZIP），Windows 选 `RemoteControl-windows-x64.zip`，不要选择 Source code。**Actions → Build and publish macOS + Windows → Run workflow** 会从同一提交构建两边；只有两边构建、测试、校验均成功，才在同一个 Release 发布全部安装包与 SHA-256 文件。旧 Release 保留，Actions 产物保留 30 天备用。
+
+**云端 Mac 签名限制：** 构建机每次重建，因此云端明确使用 ad-hoc 开发签名，不使用每次新生成的“本机固定证书”。尚无 Developer ID / 公证凭据，下载包可能被 Gatekeeper 拦截，更新后可能需要重新授权；不自动关闭安全策略或清除 quarantine。本机 `pnpm package:mac` 仍默认使用固定的本机证书，私钥不上传到仓库或 Actions。
+
 ## macOS（Apple Silicon、macOS 13.5 Ventura 及以上）
 
 构建机器需要 Node 24、pnpm、匹配的 Swift / macOS SDK：
