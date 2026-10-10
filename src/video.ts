@@ -110,8 +110,14 @@ export class VideoClient {
     };
   }
 
-  /** Asks the gateway for its counters; only sent while the overlay is open. */
-  requestServerStats(): void { this.sendImmediate({ type: 'stats' }); }
+  /**
+   * Asks the gateway for its counters; only sent while the overlay is open. Also probes RTT every second, because
+   * pong queues behind video: the 15 s heartbeat alone would hide the backlog that builds up during motion.
+   */
+  requestServerStats(): void {
+    this.sendImmediate({ type: 'stats' });
+    if (!this.pingSentAt) this.ping();
+  }
 
   constructor(
     private canvas: HTMLCanvasElement,

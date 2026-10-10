@@ -143,13 +143,15 @@ internal static class FfmpegPipeline
     /// <summary>
     /// Encoder options. All paths: no B-frames, one IDR per second (GOP = fps), access unit delimiters.
     /// The agent re-inserts parameter sets on every keyframe, so encoders need not repeat them.
+    /// Rate control is capped at the target bitrate with a ~100 ms VBV: a 1 s buffer lets motion emit a second's worth
+    /// of extra data in a burst, which queues in the network (e.g. a Cloudflare tunnel) as up to a second of lag.
     /// </summary>
     public static List<string> EncoderArguments(EncoderBackend backend, QualityPreset preset)
     {
         string fps = preset.Fps.ToString(CultureInfo.InvariantCulture);
         string bitrate = preset.Bitrate.ToString(CultureInfo.InvariantCulture);
-        string maxrate = preset.PeakBitrate.ToString(CultureInfo.InvariantCulture);
-        string[] rate = ["-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bitrate];
+        string bufsize = (preset.Bitrate / 10).ToString(CultureInfo.InvariantCulture);
+        string[] rate = ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize];
         bool hevc = preset.IsHevc;
         // NVENC/AMF/x264/x265 take "5.0"–"5.2"; QSV takes libvpl's numeric MFX levels (50–52 for both codecs).
         string level = VideoLimits.LevelName(preset.Codec, preset.EffectiveLevel);

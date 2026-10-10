@@ -77,7 +77,7 @@ test('video client counts traffic, frames, drops, RTT and gateway stats', async 
   FakeVideoDecoder.latest.callbacks.output({ close() {} });
   client.sendInput({ type: 'move', x: 0.5, y: 0.5 });
   client.requestServerStats();
-  assert.equal(JSON.parse(ws.sent.at(-1)).type, 'stats');
+  assert.deepEqual(ws.sent.slice(-2).map((m) => JSON.parse(m).type), ['stats', 'ping'], 'the stats poll also probes RTT');
   ws.onmessage({ data: JSON.stringify({ type: 'stats', framesIn: 5, framesSent: 4, framesDropped: 1, bytesSent: 99, keyframes: 1, buffered: 0, rssMb: 42, uptimeMs: 1000 }) });
 
   const s = client.stats();
