@@ -129,7 +129,7 @@ test('MSE playback chases the live edge instead of keeping a backlog as input la
   assert.ok(media.playbackRate > 1 && media.playbackRate <= 2, `a small backlog is played faster (${media.playbackRate})`);
   assert.equal(media.currentTime, 1, 'a small backlog does not seek');
   settle(1.6);
-  assert.ok(Math.abs(media.currentTime - (1.6 - 1 / 30)) < 1e-9, 'a large backlog jumps to the newest frame');
+  assert.ok(Math.abs(media.currentTime - (1.6 - 2 / 30)) < 1e-9, 'a large backlog jumps close to the newest frame');
   assert.equal(media.playbackRate, 1);
   client.close();
 });

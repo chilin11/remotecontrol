@@ -86,7 +86,7 @@ test('decoder overload reset reconfigures and waits for a keyframe', async (t) =
   const decoder = FakeVideoDecoder.instances[0];
   assert.equal(decoder.configurations.length, 1);
 
-  decoder.decodeQueueSize = 4;
+  decoder.decodeQueueSize = 5;
   ws.onmessage({ data: packet(false) });
   assert.equal(decoder.resetCount, 1);
   assert.equal(decoder.configurations.length, 2);

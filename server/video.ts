@@ -198,8 +198,9 @@ export function attachVideo(ws: WebSocket): void {
   let initialized = false;
   let decodeTime = 0;
   let sequence = 0;
-  // Latency budget for queued video: past ~150 ms of backlog skip to the next keyframe instead of
-  // letting every later frame (and the result of every click) arrive late. Floor fits one keyframe.
+  // Latency budget for queued video: past ~400 ms of backlog skip to the next keyframe instead of
+  // letting every later frame (and the result of every click) arrive late. Dropping freezes the picture until the
+  // next keyframe (up to 1 s), so the floor must comfortably fit a keyframe burst plus the frames behind it.
   let dropBacklog = 2_000_000;
   // Stats for nerds counters; reported only when the browser asks with {type:'stats'}.
   const openedAt = Date.now();
@@ -373,7 +374,7 @@ export function attachVideo(ws: WebSocket): void {
         return;
       }
       started = true;
-      dropBacklog = Math.max(256_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.15));
+      dropBacklog = Math.max(1_000_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.4));
       // Local cursor: the browser draws the pointer with no round trip; the agent hides it from the video
       // and reports its shape instead.
       const agentArgs = [codec as Codec, selectedQuality, ...(event.cursor === 'local' ? ['local-cursor'] : [])];

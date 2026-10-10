@@ -346,15 +346,17 @@ export class VideoClient {
     if (!video || source.updating || !source.buffered.length) return;
     const end = source.buffered.end(source.buffered.length - 1);
     // MSE plays at 1x, so any burst (Wi-Fi hiccup, large keyframe) would otherwise stay as permanent
-    // input lag. Hold the play head ~1–2 frames behind the newest frame: catch up fast, jump when behind.
+    // input lag. But a play head held right at the newest frame runs dry on every bit of network jitter, and each
+    // underflow is a visible hitch; seeks and rate changes hitch too. Keep a small cushion, catch up gently,
+    // and jump only when clearly behind.
     const frame = 1 / this.fps;
     const lag = end - video.currentTime;
     let rate = video.playbackRate;
-    if (lag > Math.max(0.2, 6 * frame)) {
-      video.currentTime = Math.max(0, end - frame);
+    if (lag > Math.max(0.4, 12 * frame)) {
+      video.currentTime = Math.max(0, end - 2 * frame);
       rate = 1;
-    } else if (lag > Math.max(0.05, 2 * frame)) rate = Math.min(2, 1 + 2 * lag);
-    else if (lag < Math.max(0.04, 1.5 * frame)) rate = 1;
+    } else if (lag > Math.max(0.12, 4 * frame)) rate = Math.min(1.5, 1 + lag);
+    else if (lag < Math.max(0.06, 2 * frame)) rate = 1;
     if (video.playbackRate !== rate) video.playbackRate = rate;
     const removeBefore = video.currentTime - 2;
     if (removeBefore > 0 && source.buffered.start(0) < removeBefore) {
@@ -374,8 +376,9 @@ export class VideoClient {
     if (!this.decoder || packet.length < 2) return;
     const key = packet[0] === 1;
     if (key) { this.keyframes++; this.lastKeyframeBytes = packet.length - 1; }
-    if (this.decoder.decodeQueueSize > 3) {
-      // Decoder is behind: drop the backlog and resume at the next keyframe.
+    // Decoder is behind: drop the backlog and resume at the next keyframe. That freezes the picture until the
+    // next keyframe (up to 1 s), so tolerate ~150 ms of queue (9 frames at 60 fps) before giving up on it.
+    if (this.decoder.decodeQueueSize > Math.max(4, Math.round(this.fps * 0.15))) {
       this.framesDropped += this.decoder.decodeQueueSize;
       this.decoderResets++;
       this.decoder.reset();
