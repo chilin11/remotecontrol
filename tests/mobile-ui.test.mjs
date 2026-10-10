@@ -17,6 +17,7 @@ function fixture(videoFill = false) {
     fnArmedRef: { current: false },
     pressedButtons: { current: new Set() },
     pointerStartedHere: { current: false },
+    rawMoves: { current: false },
   };
   class Video {}
   const code = transformSync(handlers, { loader: 'ts', format: 'cjs' }).code;

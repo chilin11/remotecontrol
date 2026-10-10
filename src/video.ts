@@ -248,7 +248,8 @@ export class VideoClient {
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = new VideoDecoder({
       output: (frame) => {
-        const context = this.canvas.getContext('2d', { alpha: false });
+        // desynchronized: draw straight to the screen instead of waiting for the next compositor frame.
+        const context = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
         if (context) context.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
         frame.close();
         this.framesRendered++;
@@ -345,15 +346,15 @@ export class VideoClient {
     if (!video || source.updating || !source.buffered.length) return;
     const end = source.buffered.end(source.buffered.length - 1);
     // MSE plays at 1x, so any burst (Wi-Fi hiccup, large keyframe) would otherwise stay as permanent
-    // input lag. Hold the play head ~2 frames behind the newest frame: catch up gently, jump when far behind.
+    // input lag. Hold the play head ~1–2 frames behind the newest frame: catch up fast, jump when behind.
     const frame = 1 / this.fps;
     const lag = end - video.currentTime;
     let rate = video.playbackRate;
-    if (lag > Math.max(0.35, 8 * frame)) {
+    if (lag > Math.max(0.2, 6 * frame)) {
       video.currentTime = Math.max(0, end - frame);
       rate = 1;
-    } else if (lag > Math.max(0.08, 3 * frame)) rate = Math.min(1.5, 1 + lag);
-    else if (lag < Math.max(0.05, 1.5 * frame)) rate = 1;
+    } else if (lag > Math.max(0.05, 2 * frame)) rate = Math.min(2, 1 + 2 * lag);
+    else if (lag < Math.max(0.04, 1.5 * frame)) rate = 1;
     if (video.playbackRate !== rate) video.playbackRate = rate;
     const removeBefore = video.currentTime - 2;
     if (removeBefore > 0 && source.buffered.start(0) < removeBefore) {

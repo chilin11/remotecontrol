@@ -113,6 +113,8 @@ function App() {
   const pressedKeys = useRef(new Set<string>());
   const pressedButtons = useRef(new Set<'left' | 'right'>());
   const pointerStartedHere = useRef(false);
+  // True while pointerrawupdate (unthrottled, sent as the OS reports it) carries mouse moves instead of pointermove.
+  const rawMoves = useRef(false);
   const touches = useRef(new Map<number, { x: number; y: number; startX: number; startY: number }>());
   const gesture = useRef({ multi: false, moved: false, started: 0 });
   const composing = useRef(false);
@@ -201,6 +203,26 @@ function App() {
     return () => {
       canvas?.removeEventListener('wheel', wheel);
       video?.removeEventListener('wheel', wheel);
+    };
+  }, [status, videoFill]);
+
+  // pointermove is aligned to animation frames (up to ~16 ms late); pointerrawupdate is delivered as soon as
+  // the OS reports motion. Browsers expose it only in secure contexts (HTTPS / localhost).
+  useEffect(() => {
+    if (status !== 'connected' || !('onpointerrawupdate' in window)) return;
+    const raw = (event: Event) => {
+      const pointer = event as PointerEvent;
+      if (pointer.pointerType === 'touch') return;
+      const point = videoPoint(pointer.currentTarget as HTMLCanvasElement | HTMLVideoElement, pointer.clientX, pointer.clientY);
+      if (!point || (!pointerStartedHere.current && !point.inside)) return;
+      videoRef.current?.sendInput({ type: 'move', x: point.x, y: point.y });
+    };
+    const targets = [canvasRef.current, mediaRef.current];
+    for (const target of targets) target?.addEventListener('pointerrawupdate', raw);
+    rawMoves.current = true;
+    return () => {
+      rawMoves.current = false;
+      for (const target of targets) target?.removeEventListener('pointerrawupdate', raw);
     };
   }, [status, videoFill]);
 
@@ -501,7 +523,8 @@ function App() {
   function pointerMove(event: React.PointerEvent<HTMLCanvasElement | HTMLVideoElement>) {
     if (status !== 'connected') return;
     if (event.pointerType !== 'touch') {
-      videoPosition(event, pointerStartedHere.current); syncVideoButtons(event.buttons, pointerStartedHere.current); return;
+      if (!rawMoves.current) videoPosition(event, pointerStartedHere.current);
+      syncVideoButtons(event.buttons, pointerStartedHere.current); return;
     }
     const touch = touches.current.get(event.pointerId);
     if (!touch) return;

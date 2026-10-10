@@ -198,7 +198,7 @@ export function attachVideo(ws: WebSocket): void {
   let initialized = false;
   let decodeTime = 0;
   let sequence = 0;
-  // Latency budget for queued video: past ~300 ms of backlog skip to the next keyframe instead of
+  // Latency budget for queued video: past ~150 ms of backlog skip to the next keyframe instead of
   // letting every later frame (and the result of every click) arrive late. Floor fits one keyframe.
   let dropBacklog = 2_000_000;
   // Stats for nerds counters; reported only when the browser asks with {type:'stats'}.
@@ -338,6 +338,14 @@ export function attachVideo(ws: WebSocket): void {
     }
   }
 
+  // Newest mouse position waiting for the agent's stdin to drain (older ones are superseded, not queued).
+  let pendingMove: string | undefined;
+  function flushMove(): void {
+    const line = pendingMove;
+    pendingMove = undefined;
+    if (line && child?.stdin.writable) child.stdin.write(line);
+  }
+
   ws.on('message', (raw, binary) => {
     if (binary) return;
     const body = raw.toString();
@@ -365,7 +373,7 @@ export function attachVideo(ws: WebSocket): void {
         return;
       }
       started = true;
-      dropBacklog = Math.max(256_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.3));
+      dropBacklog = Math.max(256_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.15));
       // Local cursor: the browser draws the pointer with no round trip; the agent hides it from the video
       // and reports its shape instead.
       const agentArgs = [codec as Codec, selectedQuality, ...(event.cursor === 'local' ? ['local-cursor'] : [])];
@@ -409,8 +417,18 @@ export function attachVideo(ws: WebSocket): void {
     if (child.stdin.writableLength > 128 * 1024) { fail('Capture input is not responding.'); return; }
     const type = event.type;
     if (type === 'move' && typeof event.x === 'number' && typeof event.y === 'number' && Number.isFinite(event.x) && Number.isFinite(event.y)) {
-      child.stdin.write(JSON.stringify({ type, x: Math.max(0, Math.min(1, event.x)), y: Math.max(0, Math.min(1, event.y)) }) + '\n');
-    } else if (type === 'button' && (event.button === 'left' || event.button === 'right') && typeof event.down === 'boolean') {
+      const line = JSON.stringify({ type, x: Math.max(0, Math.min(1, event.x)), y: Math.max(0, Math.min(1, event.y)) }) + '\n';
+      // If the agent pipe is backed up, only the newest position matters: replaying stale ones is pure lag.
+      if (child.stdin.writableLength > 0) {
+        const waiting = pendingMove !== undefined;
+        pendingMove = line;
+        if (!waiting) child.stdin.once('drain', flushMove);
+      } else child.stdin.write(line);
+      return;
+    }
+    // Anything else must stay ordered after the moves before it.
+    flushMove();
+    if (type === 'button' && (event.button === 'left' || event.button === 'right') && typeof event.down === 'boolean') {
       child.stdin.write(JSON.stringify({ type, button: event.button, down: event.down }) + '\n');
     } else if (type === 'wheel' && typeof event.dy === 'number' && Number.isFinite(event.dy)) {
       child.stdin.write(JSON.stringify({ type, dy: Math.trunc(Math.max(-1000, Math.min(1000, event.dy))) }) + '\n');

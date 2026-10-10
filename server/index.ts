@@ -140,7 +140,15 @@ videoWss.on('connection', (ws: WebSocket, token: string) => {
   videoController = { ws, token };
   attachVideo(ws);
   ws.on('close', () => { if (videoController?.ws === ws) videoController = undefined; });
-  ws.on('message', () => { validSession(token, true); });
+  // Input arrives up to 1000×/s; a synchronous SQLite read + hash per message stalls the event loop
+  // (and every queued video frame). Keeping the idle session alive needs at most one touch every few seconds.
+  let touchedAt = 0;
+  ws.on('message', () => {
+    const now = Date.now();
+    if (now - touchedAt < 5_000) return;
+    touchedAt = now;
+    validSession(token, true);
+  });
   const check = setInterval(() => { if (!validSession(token)) ws.close(4001, 'Session expired'); }, 30_000);
   ws.on('close', () => clearInterval(check));
 });

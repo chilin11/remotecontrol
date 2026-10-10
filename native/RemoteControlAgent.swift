@@ -126,7 +126,7 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
     /// Polls the system cursor (AppKit, so on the main queue) and sends its shape when it changes.
     private func startCursorUpdates() {
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(50), leeway: .milliseconds(10))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(20), leeway: .milliseconds(4))
         timer.setEventHandler { [weak self] in self?.sendCursorIfChanged() }
         timer.resume()
         cursorTimer = timer
@@ -170,6 +170,8 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: quality.fps as CFNumber)
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: quality.fps as CFNumber)
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        // Emit every frame as soon as it is encoded instead of holding frames for rate-control lookahead.
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         let profile = codecName == "hevc" ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_Baseline_AutoLevel
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ProfileLevel, value: profile)
         VTCompressionSessionPrepareToEncodeFrames(created)

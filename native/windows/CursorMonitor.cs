@@ -17,7 +17,8 @@ internal static class CursorMonitor
     {
         double scale = DpiScale();
         IntPtr last = IntPtr.Zero;
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(50));
+        // GetCursorInfo is a cheap handle compare; a shape is only rendered when it changes. 16 ms ≈ one display frame.
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(16));
         try
         {
             do
