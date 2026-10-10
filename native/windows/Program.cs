@@ -53,6 +53,8 @@ internal static class Program
                 preset = preset with { Fps = limits.Fps, Level = limits.Level };
             }
             bool localCursor = args.Skip(2).Contains("local-cursor");
+            // Desktop Duplication only sees frames while Windows drives a display: keep it awake for the session.
+            DisplayPower.KeepAwakeForSession();
             return Agent.RunAsync(preset, screen, width, height, localCursor).GetAwaiter().GetResult();
         }
         catch (Exception ex)
@@ -116,13 +118,16 @@ internal static class Agent
             {
                 var (backend, useDda) = attempts[index];
                 bool last = index == attempts.Count - 1;
-                var result = await RunPipelineAsync(ffmpeg, backend, preset, screen, width, height, useDda, !localCursor, inputTask);
+                // Only Desktop Duplication can hang without frames; the GPU encoder itself was probed already.
+                var result = await RunPipelineAsync(ffmpeg, backend, preset, screen, width, height, useDda, !localCursor, inputTask,
+                    useDda && !last ? TimeSpan.FromSeconds(4) : null);
                 if (result.InputEnded) return 0;
                 if (result.Error is null) return 0;
                 if (!result.ProducedFrames && !last)
                 {
                     Console.Error.WriteLine($"Video pipeline {FfmpegPipeline.Name(backend)}{(useDda ? "/ddagrab" : "/gdigrab")} failed, trying the next option: {result.Error}");
-                    if (backend != EncoderBackend.Software && attempts[index + 1].Backend == EncoderBackend.Software)
+                    // A ddagrab stall says nothing about the GPU encoder: keep its cached selection.
+                    if (!useDda && backend != EncoderBackend.Software && attempts[index + 1].Backend == EncoderBackend.Software)
                         EncoderSelector.Forget(ffmpeg, preset.Codec);
                     continue;
                 }
@@ -141,8 +146,15 @@ internal static class Agent
 
     private sealed record PipelineResult(bool InputEnded, bool ProducedFrames, string? Error);
 
+    /// <summary>Completes once the timeout passes without the parser having emitted a frame; never completes otherwise.</summary>
+    private static async Task WaitForFirstFrameAsync(AnnexBAccessUnitParser parser, TimeSpan timeout)
+    {
+        await Task.Delay(timeout).ConfigureAwait(false);
+        if (parser.EmittedFrames) await Task.Delay(Timeout.Infinite).ConfigureAwait(false);
+    }
+
     private static async Task<PipelineResult> RunPipelineAsync(string ffmpeg, EncoderBackend backend, QualityPreset preset,
-        Rectangle screen, int width, int height, bool useDda, bool drawMouse, Task inputTask)
+        Rectangle screen, int width, int height, bool useDda, bool drawMouse, Task inputTask, TimeSpan? firstFrameTimeout = null)
     {
         using var process = new Process { StartInfo = BuildStartInfo(ffmpeg, backend, preset, screen, width, height, useDda, drawMouse), EnableRaisingEvents = true };
         try
@@ -170,7 +182,18 @@ internal static class Agent
         Task captureTask = PumpCaptureAsync(process.StandardOutput.BaseStream, parser);
         try
         {
-            Task first = await Task.WhenAny(captureTask, inputTask);
+            // A capture that starts but never yields a frame (display asleep/off, nothing to duplicate) does not exit
+            // by itself. Give it a few seconds, then let the caller try the next capture method.
+            Task first = await Task.WhenAny(captureTask, inputTask, firstFrameTimeout is null ? Task.Delay(Timeout.Infinite) : WaitForFirstFrameAsync(parser, firstFrameTimeout.Value));
+            if (first != captureTask && first != inputTask)
+            {
+                StopProcess(process);
+                try { await captureTask; }
+                catch (IOException) { }
+                catch (ObjectDisposedException) { }
+                catch (InvalidDataException) { }
+                return new PipelineResult(false, parser.EmittedFrames, $"No video frames within {firstFrameTimeout!.Value.TotalSeconds:0} s (is the display asleep or disconnected?).");
+            }
             if (first == inputTask)
             {
                 await inputTask;

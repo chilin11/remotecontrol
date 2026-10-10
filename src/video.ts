@@ -351,18 +351,20 @@ export class VideoClient {
     const video = this.video;
     if (!video || source.updating || !source.buffered.length) return;
     const end = source.buffered.end(source.buffered.length - 1);
-    // MSE plays at 1x, so any burst (Wi-Fi hiccup, large keyframe) would otherwise stay as permanent
-    // input lag. But a play head held right at the newest frame runs dry on every bit of network jitter, and each
-    // underflow is a visible hitch; seeks and rate changes hitch too. Keep a small cushion, catch up gently,
-    // and jump only when clearly behind.
+    // MSE plays its own timeline, but frames arrive on the host's clock: a capture running a little under the declared
+    // rate drains the buffer and playback stalls (fps drops to 0, then recovers), a little over builds input lag.
+    // Steer the speed around a small cushion instead of only ever speeding up; seek only when far behind.
     const frame = 1 / this.fps;
+    const target = Math.max(0.05, 3 * frame);
     const lag = end - video.currentTime;
     let rate = video.playbackRate;
-    if (lag > Math.max(0.4, 12 * frame)) {
-      video.currentTime = Math.max(0, end - 2 * frame);
+    if (lag > Math.max(0.5, 15 * frame)) {
+      video.currentTime = Math.max(0, end - target);
       rate = 1;
-    } else if (lag > Math.max(0.12, 4 * frame)) rate = Math.min(1.5, 1 + lag);
-    else if (lag < Math.max(0.06, 2 * frame)) rate = 1;
+    } else {
+      // 0.05 steps: playbackRate changes are not free, so do not touch it on every frame.
+      rate = Math.round(Math.min(1.5, Math.max(0.85, 1 + 2 * (lag - target))) * 20) / 20;
+    }
     if (video.playbackRate !== rate) video.playbackRate = rate;
     const removeBefore = video.currentTime - 2;
     if (removeBefore > 0 && source.buffered.start(0) < removeBefore) {
