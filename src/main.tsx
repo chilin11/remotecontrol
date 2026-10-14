@@ -28,6 +28,9 @@ type SpecialKey = keyof typeof videoSpecialCodes;
 const videoModifierCodes = { Command: 'MetaLeft', Control: 'ControlLeft', Option: 'AltLeft', Shift: 'ShiftLeft' } as const;
 type ModifierKey = keyof typeof videoModifierCodes;
 const isFnKey = (event: React.KeyboardEvent) => event.key === 'Fn' || event.key === 'FnLock' || event.code === 'Fn' || event.code === 'FnLock';
+// Physical modifier keys and the event flag that says whether one of them is really held right now.
+const heldModifierFlags = { ShiftLeft: 'shiftKey', ShiftRight: 'shiftKey', ControlLeft: 'ctrlKey', ControlRight: 'ctrlKey', AltLeft: 'altKey', AltRight: 'altKey', MetaLeft: 'metaKey', MetaRight: 'metaKey' } as const;
+type ModifierFlags = Pick<MouseEvent, 'shiftKey' | 'ctrlKey' | 'altKey' | 'metaKey'>;
 
 async function api(path: string, options?: RequestInit) {
   const response = await fetch(`/api/${path}`, { credentials: 'same-origin', cache: 'no-store', ...options });
@@ -194,6 +197,7 @@ function App() {
       const target = event.currentTarget as HTMLCanvasElement | HTMLVideoElement;
       if (!videoPoint(target, event.clientX, event.clientY)?.inside) return;
       event.preventDefault();
+      releaseStaleModifiers(event);
       videoRef.current?.sendInput({ type: 'wheel', dy: event.deltaY });
     };
     const canvas = canvasRef.current;
@@ -504,6 +508,7 @@ function App() {
 
   function pointerDown(event: React.PointerEvent<HTMLCanvasElement | HTMLVideoElement>) {
     if (status !== 'connected') return;
+    if (event.pointerType !== 'touch') releaseStaleModifiers(event);
     event.preventDefault();
     if (!videoPoint(event.currentTarget, event.clientX, event.clientY)?.inside) return;
     if (!mobileKeys) event.currentTarget.focus({ preventScroll: true });
@@ -546,6 +551,7 @@ function App() {
 
   function pointerUp(event: React.PointerEvent<HTMLCanvasElement | HTMLVideoElement>) {
     if (event.pointerType !== 'touch') {
+      if (status === 'connected') releaseStaleModifiers(event);
       syncVideoButtons(event.buttons); if (!event.buttons) pointerStartedHere.current = false;
     } else if (touches.current.delete(event.pointerId) && !touches.current.size) {
       const { multi, moved, started } = gesture.current;
@@ -581,6 +587,31 @@ function App() {
     setModifiers([]);
   }
 
+  /**
+   * A modifier's keyup can be swallowed before the page sees it (input-source switch with Cmd/Ctrl+Space or Shift,
+   * system shortcuts, screenshots), leaving it held on the host so every later click is a Shift/Command-click. Key,
+   * pointer and wheel events report which modifiers are really down: release any the browser no longer reports.
+   */
+  function releaseStaleModifiers(flags: ModifierFlags, except?: string) {
+    for (const code of pressedKeys.current) {
+      const flag = heldModifierFlags[code as keyof typeof heldModifierFlags];
+      if (!flag || code === except || flags[flag]) continue;
+      pressedKeys.current.delete(code);
+      videoRef.current?.sendInput({ type: 'key', code, down: false });
+    }
+  }
+
+  /** macOS browsers send no keyup for keys released while Command is held: release them together with Command. */
+  function releaseKeysHeldWithCommand() {
+    for (const code of pressedKeys.current) {
+      // CapsLock reports its lock state (keydown on, keyup off), not the key.
+      if (code in heldModifierFlags || code === 'CapsLock') continue;
+      pressedKeys.current.delete(code);
+      videoRef.current?.sendInput({ type: 'key', code, down: false, ...(fnKeyCode.current === code ? { fn: true } : {}) });
+      if (fnKeyCode.current === code) fnKeyCode.current = null;
+    }
+  }
+
   function videoKey(event: React.KeyboardEvent<HTMLCanvasElement | HTMLVideoElement>, down: boolean) {
     if (isFnKey(event)) { event.preventDefault(); return; }
     if (event.nativeEvent?.isComposing || event.keyCode === 229 || event.key === 'Process' || event.key === 'Dead') {
@@ -595,15 +626,22 @@ function App() {
     }
     if (status !== 'connected') return;
     event.preventDefault();
+    releaseStaleModifiers(event, event.code);
     if (down) {
-      if (pressedKeys.current.has(event.code)) return;
+      if (pressedKeys.current.has(event.code)) {
+        if (event.repeat) return;
+        // Its keyup never arrived (e.g. Cmd+Z, Z while Command stays held on macOS): finish that press first.
+        videoRef.current?.sendInput({ type: 'key', code: event.code, down: false, ...(fnKeyCode.current === event.code ? { fn: true } : {}) });
+        if (fnKeyCode.current === event.code) fnKeyCode.current = null;
+      }
       pressedKeys.current.add(event.code);
       if (consumeFn()) fnKeyCode.current = event.code;
-    } else {
-      pressedKeys.current.delete(event.code);
+    } else if (!pressedKeys.current.delete(event.code)) {
+      return; // never sent down (pressed before connecting, or already released above)
     }
     videoRef.current?.sendInput({ type: 'key', code: event.code, down, ...(fnKeyCode.current === event.code ? { fn: true } : {}) });
     if (!down && fnKeyCode.current === event.code) fnKeyCode.current = null;
+    if (!down && (event.code === 'MetaLeft' || event.code === 'MetaRight')) releaseKeysHeldWithCommand();
   }
 
   if (loading) return <main className="landing"><div className="boot" role="status"><span className="boot-ring" aria-hidden="true" /><span>initializing secure link…</span></div></main>;

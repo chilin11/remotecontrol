@@ -286,3 +286,44 @@ test('fullscreen is only offered while connected, but an open view can always be
   assert.equal(isDisabled('disconnected', 'theater'), false, 'Exit view stays usable');
   assert.equal(isDisabled('connected', 'normal', true), true, 'pending request blocks double taps');
 });
+
+const keyEvent = (code, flags = {}, repeat = false) => ({ key: code, code, repeat, preventDefault() {}, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, ...flags });
+
+test('a modifier whose keyup was swallowed is released before the next click', () => {
+  const f = fixture();
+  f.videoKey(keyEvent('ShiftLeft', { shiftKey: true }), true);
+  // Its keyup never reached the page (e.g. input-source switch); the click reports Shift as not held.
+  f.pointerDown({ ...f.event(1, 160, 120, 'mouse', 1), shiftKey: false, ctrlKey: false, altKey: false, metaKey: false });
+  assert.deepEqual(f.sent.filter(v => v.type !== 'move'), [
+    { type: 'key', code: 'ShiftLeft', down: true },
+    { type: 'key', code: 'ShiftLeft', down: false },
+    { type: 'button', button: 'left', down: true },
+  ]);
+  // A really held modifier is kept.
+  f.sent.length = 0;
+  f.videoKey(keyEvent('MetaLeft', { metaKey: true }), true);
+  f.pointerUp({ ...f.event(1, 160, 120, 'mouse', 0), shiftKey: false, ctrlKey: false, altKey: false, metaKey: true });
+  assert.deepEqual(f.sent, [{ type: 'key', code: 'MetaLeft', down: true }, { type: 'button', button: 'left', down: false }]);
+  // The late keyup of the already released Shift is not sent again.
+  f.sent.length = 0;
+  f.videoKey(keyEvent('ShiftLeft', { metaKey: true }), false);
+  assert.deepEqual(f.sent, []);
+});
+
+test('macOS Cmd+Z, Z: keys without a keyup are re-pressed and released with Command', () => {
+  const f = fixture();
+  f.videoKey(keyEvent('MetaLeft', { metaKey: true }), true);
+  f.videoKey(keyEvent('KeyZ', { metaKey: true }), true);
+  f.videoKey(keyEvent('KeyZ', { metaKey: true }, true), true); // auto-repeat: ignored
+  f.videoKey(keyEvent('KeyZ', { metaKey: true }), true); // second press, the first keyup never came
+  f.videoKey(keyEvent('MetaLeft'), false);
+  assert.deepEqual(f.sent, [
+    { type: 'key', code: 'MetaLeft', down: true },
+    { type: 'key', code: 'KeyZ', down: true },
+    { type: 'key', code: 'KeyZ', down: false },
+    { type: 'key', code: 'KeyZ', down: true },
+    { type: 'key', code: 'MetaLeft', down: false },
+    { type: 'key', code: 'KeyZ', down: false },
+  ]);
+  assert.equal(f.refs.pressedKeys.current.size, 0);
+});

@@ -255,6 +255,21 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         writer.send(type: 2, data: bytes)
     }
 
+    // Shift/Control/Option/Command flag bits (device-independent plus left/right) per held modifier key.
+    private static let modifierBits: [CGKeyCode: UInt64] = [56: 0x20002, 60: 0x20004, 59: 0x40001, 62: 0x42000, 58: 0x80020, 61: 0x80040, 55: 0x100008, 54: 0x100010]
+    private static let modifierMask = CGEventFlags(rawValue: 0x1E207F)
+
+    /// Events created without a source carry only their own key's modifier bit (a Shift event while Command is held
+    /// says "only Shift", a click says "none"), and a flagsChanged event's flags are the whole modifier state. Stamp
+    /// every event with the modifiers actually held, so interleaved modifiers cannot leave one stuck on the host.
+    @discardableResult
+    private func withHeldModifiers(_ event: CGEvent?) -> CGEvent? {
+        guard let event else { return nil }
+        let held = pressedKeys.reduce(UInt64(0)) { $0 | (Self.modifierBits[$1] ?? 0) }
+        event.flags = event.flags.subtracting(Self.modifierMask).union(CGEventFlags(rawValue: held))
+        return event
+    }
+
     private func readInput() {
         while let line = readLine() {
             guard let data = line.data(using: .utf8), let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let type = event["type"] as? String else { continue }
@@ -269,7 +284,7 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
                 else if pressedButtons.contains("left") { mouseType = .leftMouseDragged; mouseButton = .left }
                 else { mouseType = .mouseMoved; mouseButton = .left }
                 if !pressedButtons.isEmpty && hypot(point.x - pressPoint.x, point.y - pressPoint.y) > 5 { clickDragged = true }
-                CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton)?.post(tap: .cghidEventTap)
+                withHeldModifiers(CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton))?.post(tap: .cghidEventTap)
             case "button":
                 guard let button = event["button"] as? String, let down = event["down"] as? Bool else { continue }
                 guard button == "left" || button == "right" else { continue }
@@ -286,17 +301,17 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
                     else { lastClickButton = "" }
                 }
                 let kind: CGEventType = right ? (down ? .rightMouseDown : .rightMouseUp) : (down ? .leftMouseDown : .leftMouseUp)
-                if let mouse = CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left) {
+                if let mouse = withHeldModifiers(CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left)) {
                     mouse.setIntegerValueField(.mouseEventClickState, value: clickCount)
                     mouse.post(tap: .cghidEventTap)
                 }
             case "wheel":
                 guard let dy = event["dy"] as? Int else { continue }
-                CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(max(-1000, min(1000, -dy))), wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
+                withHeldModifiers(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(max(-1000, min(1000, -dy))), wheel2: 0, wheel3: 0))?.post(tap: .cghidEventTap)
             case "key":
                 guard let code = event["code"] as? String, let down = event["down"] as? Bool, let keyCode = Self.keyCodes[code] else { continue }
                 if down { pressedKeys.insert(keyCode) } else { pressedKeys.remove(keyCode) }
-                if let key = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down) {
+                if let key = withHeldModifiers(CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down)) {
                     key.flags = (event["fn"] as? Bool == true ? key.flags.union(.maskSecondaryFn) : key.flags.subtracting(.maskSecondaryFn))
                     key.post(tap: .cghidEventTap)
                 }
@@ -322,14 +337,15 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
             }
         }
         for code in pressedKeys {
-            if let key = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) {
+            pressedKeys.remove(code)
+            if let key = withHeldModifiers(CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)) {
                 key.flags = key.flags.subtracting(.maskSecondaryFn)
                 key.post(tap: .cghidEventTap)
             }
         }
         for button in pressedButtons {
             let right = button == "right"
-            CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left)?.post(tap: .cghidEventTap)
+            withHeldModifiers(CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: lastMouse, mouseButton: right ? .right : .left))?.post(tap: .cghidEventTap)
         }
         exit(0)
     }
