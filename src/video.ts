@@ -392,6 +392,8 @@ export class VideoClient {
       this.decoder.reset();
       this.decoder.configure({ codec: this.codecString!, codedWidth: this.canvas.width, codedHeight: this.canvas.height, hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true });
       this.waitingForKey = true;
+      // A host that only encodes on screen changes may not send its next keyframe for seconds: ask for one.
+      this.sendImmediate({ type: 'keyframe' });
     }
     if (this.waitingForKey && !key) { this.framesDropped++; return; }
     if (key) this.waitingForKey = false;
@@ -415,12 +417,12 @@ export class VideoClient {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (ws.bufferedAmount > 64 * 1024) {
-      if (value.type === 'move' || value.type === 'wheel') return;
+      if (value.type === 'move' || value.type === 'wheel' || value.type === 'keyframe') return;
       ws.close();
       return;
     }
     ws.send(JSON.stringify(value));
-    if (value.type !== 'ping' && value.type !== 'stats' && value.type !== 'flow') this.inputsSent++;
+    if (value.type !== 'ping' && value.type !== 'stats' && value.type !== 'flow' && value.type !== 'keyframe') this.inputsSent++;
   }
 
   sendText(text: string): Promise<void> {

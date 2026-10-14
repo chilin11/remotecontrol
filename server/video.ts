@@ -202,14 +202,37 @@ export function attachVideo(ws: WebSocket): void {
   // letting every later frame (and the result of every click) arrive late. The encoder caps bursts at ~100 ms of
   // data, so normal motion stays under this; the floor still fits one keyframe.
   let dropBacklog = 2_000_000;
+  // The macOS agent only encodes when the screen changes and counts its keyframe interval in frames, so after a drop
+  // on a mostly still screen the next keyframe could be many seconds away. Ask the agent for one instead (it re-encodes
+  // its last frame), once the backlog has cleared and at most once a second so a slow link does not loop on keyframes.
+  let lastKeyRequestAt = 0;
+  let keyTimer: ReturnType<typeof setInterval> | undefined;
   // Stats for nerds counters; reported only when the browser asks with {type:'stats'}.
   const openedAt = Date.now();
   const counters = { framesIn: 0, framesSent: 0, framesDropped: 0, bytesSent: 0, keyframes: 0 };
   let lastStatsAt = 0;
 
+  function requestKeyframe(): void {
+    const now = Date.now();
+    if (now - lastKeyRequestAt < 1000 || !child?.stdin.writable) return;
+    lastKeyRequestAt = now;
+    child.stdin.write('{"type":"keyframe"}\n');
+  }
+  function checkKeyframe(): void {
+    if (!waitingForKey || ws.readyState !== WebSocket.OPEN) { clearInterval(keyTimer); keyTimer = undefined; return; }
+    if (!flowPaused && ws.bufferedAmount <= dropBacklog / 4) requestKeyframe();
+  }
+  function awaitKeyframe(): void {
+    waitingForKey = true;
+    // Also covers a still screen, where no further frame would arrive to trigger the check.
+    keyTimer ??= setInterval(checkKeyframe, 250);
+    checkKeyframe();
+  }
+
   function sendJson(value: unknown) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value)); }
   function stop() {
     if (startupTimer) clearTimeout(startupTimer);
+    if (keyTimer) { clearInterval(keyTimer); keyTimer = undefined; }
     const running = child;
     running?.stdin.end();
     if (running) setTimeout(() => { if (running.exitCode === null && running.signalCode === null) running.kill(); }, 1200).unref();
@@ -305,9 +328,9 @@ export function attachVideo(ws: WebSocket): void {
     counters.framesIn++;
     if (flowPaused) { counters.framesDropped++; return; }
     const key = payload[0] === 1;
-    if (ws.bufferedAmount > dropBacklog) waitingForKey = true;
+    if (ws.bufferedAmount > dropBacklog && !waitingForKey) awaitKeyframe();
     if (waitingForKey) {
-      if (!key || ws.bufferedAmount > dropBacklog / 4) { counters.framesDropped++; return; }
+      if (!key || ws.bufferedAmount > dropBacklog / 4) { counters.framesDropped++; checkKeyframe(); return; }
       waitingForKey = false;
     }
     const before = ws.bufferedAmount;
@@ -411,11 +434,13 @@ export function attachVideo(ws: WebSocket): void {
     }
     if (event.type === 'flow' && typeof event.paused === 'boolean') {
       flowPaused = event.paused;
-      if (!flowPaused) waitingForKey = true;
+      if (!flowPaused) awaitKeyframe();
       return;
     }
     if (!started || !child?.stdin.writable) return;
     if (child.stdin.writableLength > 128 * 1024) { fail('Capture input is not responding.'); return; }
+    // The browser reset its decoder and needs a fresh keyframe; same once-a-second limit as the gateway's own requests.
+    if (event.type === 'keyframe') { requestKeyframe(); return; }
     const type = event.type;
     if (type === 'move' && typeof event.x === 'number' && typeof event.y === 'number' && Number.isFinite(event.x) && Number.isFinite(event.y)) {
       const line = JSON.stringify({ type, x: Math.max(0, Math.min(1, event.x)), y: Math.max(0, Math.min(1, event.y)) }) + '\n';

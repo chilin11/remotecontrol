@@ -91,6 +91,7 @@ test('decoder overload reset reconfigures and waits for a keyframe', async (t) =
   assert.equal(decoder.resetCount, 1);
   assert.equal(decoder.configurations.length, 2);
   assert.equal(decoder.chunks.length, 0, 'delta frames must be dropped until a keyframe arrives');
+  assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: 'keyframe' }, 'a reset asks the host for a keyframe');
 
   ws.onmessage({ data: packet(true) });
   ws.onmessage({ data: packet(false) });

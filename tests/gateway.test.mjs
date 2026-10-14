@@ -105,6 +105,18 @@ test('video stream is authenticated and forwards capture and input', { skip: pro
   assert.equal(stats[0].keyframes, 1);
   assert.ok(stats[0].rssMb > 0 && stats[0].uptimeMs >= 0);
   assert.equal(messages.filter((m) => !m.binary && JSON.parse(m.data.toString()).input?.type === 'stats').length, 0, 'stats requests never reach the agent');
+  // Frames dropped while waiting for a keyframe: ask the agent for one instead of waiting for its interval.
+  const keyRequests = () => messages.filter((m) => !m.binary && JSON.parse(m.data.toString()).input?.type === 'keyframe').length;
+  ws.send(JSON.stringify({ type: 'keyframe' }));
+  for (let i = 0; i < 100 && keyRequests() < 1; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(keyRequests(), 1, 'a browser keyframe request reaches the agent');
+  ws.send(JSON.stringify({ type: 'flow', paused: true }));
+  ws.send(JSON.stringify({ type: 'flow', paused: false }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(keyRequests(), 1, 'keyframe requests are limited to one per second');
+  // No frame arrives (a still screen), so the gateway retries on its own once the limit allows.
+  for (let i = 0; i < 150 && keyRequests() < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(keyRequests(), 2, 'resuming after a flow pause requests a keyframe');
   ws.terminate();
 });
 

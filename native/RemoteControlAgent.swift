@@ -81,6 +81,13 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
     var clickCount: Int64 = 1
     var clickDragged = false
     var pressPoint = CGPoint.zero
+    // Capture-queue state: the newest screen image, so a keyframe can be produced even while the screen is still
+    // (ScreenCaptureKit delivers no frames then, and the keyframe interval counts frames, not time).
+    let captureQueue = DispatchQueue(label: "remotecontrol.capture")
+    private var lastImage: CVImageBuffer?
+    private var lastPTS = CMTime.invalid
+    private var lastEncodedAt: TimeInterval = 0
+    private var forceKeyframe = false
 
     func start() async throws {
         guard codecName == "hevc" || codecName == "h264" else { throw NSError(domain: "RemoteControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported codec"]) }
@@ -107,11 +114,12 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         config.width = width
         config.height = height
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(quality.fps))
-        config.queueDepth = 3
+        // One surface stays held as `lastImage`; the extra slot keeps it from starving capture.
+        config.queueDepth = 4
         config.showsCursor = !localCursor
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "remotecontrol.capture"))
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
         self.stream = stream
         let codecString = codecName == "hevc" ? "hvc1.1.6.L\(hevcLevel(width, height, quality.fps)).B0" : String(format: "avc1.42E0%02X", h264Level(width, height, quality.fps))
         writer.json(["type": "stream", "codec": codecName, "codecString": codecString, "width": width, "height": height, "fps": quality.fps])
@@ -178,8 +186,33 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen, sampleBuffer.isValid, let image = CMSampleBufferGetImageBuffer(sampleBuffer), let encoder else { return }
-        VTCompressionSessionEncodeFrame(encoder, imageBuffer: image, presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), duration: .invalid, frameProperties: nil, sourceFrameRefcon: nil, infoFlagsOut: nil)
+        guard outputType == .screen, sampleBuffer.isValid, let image = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastImage = image
+        encode(image, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+    }
+
+    /// Capture queue only.
+    private func encode(_ image: CVImageBuffer, at time: CMTime) {
+        guard let encoder else { return }
+        // VideoToolbox needs increasing timestamps; a re-encoded frame can land just after a captured one.
+        var pts = time
+        if lastPTS.isValid && pts <= lastPTS { pts = lastPTS + CMTime(value: 1, timescale: 1000) }
+        lastPTS = pts
+        lastEncodedAt = ProcessInfo.processInfo.systemUptime
+        let properties: CFDictionary? = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary : nil
+        forceKeyframe = false
+        VTCompressionSessionEncodeFrame(encoder, imageBuffer: image, presentationTimeStamp: pts, duration: .invalid, frameProperties: properties, sourceFrameRefcon: nil, infoFlagsOut: nil)
+    }
+
+    /// The gateway or browser dropped frames and waits for a keyframe: encode the newest image as one now.
+    private func requestKeyframe() {
+        captureQueue.async {
+            self.forceKeyframe = true
+            guard let image = self.lastImage, self.lastPTS.isValid else { return }
+            // Advance the timestamp by the real time since the last frame so rate control sees the true gap.
+            let elapsed = max(1.0 / Double(quality.fps), ProcessInfo.processInfo.systemUptime - self.lastEncodedAt)
+            self.encode(image, at: self.lastPTS + CMTime(seconds: elapsed, preferredTimescale: 90_000))
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: any Error) {
@@ -283,6 +316,8 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
                         }
                     }
                 }
+            case "keyframe":
+                requestKeyframe()
             default: break
             }
         }
