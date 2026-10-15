@@ -185,6 +185,7 @@ export function attachVideo(ws: WebSocket): void {
   let child: ChildProcessWithoutNullStreams | undefined;
   let started = false;
   let waitingForKey = false;
+  let keyframeRequested = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let mse = false;
   let flowPaused = false;
@@ -198,9 +199,9 @@ export function attachVideo(ws: WebSocket): void {
   let initialized = false;
   let decodeTime = 0;
   let sequence = 0;
-  // Latency budget for queued video: past ~200 ms of backlog skip to the next keyframe instead of
-  // letting every later frame (and the result of every click) arrive late. The encoder caps bursts at ~100 ms of
-  // data, so normal motion stays under this; the floor still fits one keyframe.
+  // Windows caps encoder bursts with a short VBV, so a ~200 ms budget is sufficient there. macOS VideoToolbox
+  // only has an average bitrate target: retain the earlier ~400 ms / 1 MB burst budget, otherwise a single motion
+  // burst can discard every subsequent delta even after the socket drains, freezing until another keyframe.
   let dropBacklog = 2_000_000;
   // The macOS agent only encodes when the screen changes and counts its keyframe interval in frames, so after a drop
   // on a mostly still screen the next keyframe could be many seconds away. Ask the agent for one instead (it re-encodes
@@ -211,22 +212,45 @@ export function attachVideo(ws: WebSocket): void {
   const openedAt = Date.now();
   const counters = { framesIn: 0, framesSent: 0, framesDropped: 0, bytesSent: 0, keyframes: 0 };
   let lastStatsAt = 0;
+  // Stall diagnostics: the browser reports every 5 s; a line is logged only when playback hitched, combining its view
+  // with the gateway's (backlog drops, keyframe waits) and the agent's (captured/repeated/encoder-dropped frames).
+  let agentDiag: Record<string, unknown> = {};
+  let lastClientDiag: Record<string, number> | undefined;
+  let lastDiagCounters = { ...counters };
+  let keyWaitSince = 0;
+  let keyWaits = 0;
+  let keyWaitMaxMs = 0;
+  let keyRequests = 0;
+  let maxKeyBytes = 0;
+  let lastKeyBytes = 0;
+  // Per window: longest pause between forwarded frames, and the most data queued behind the socket (cloudflared not reading).
+  let lastSentAt = 0;
+  let maxSendGap = 0;
+  let maxBuffered = 0;
+
+  let maxDeltaBytes = 0;
 
   function requestKeyframe(): void {
     const now = Date.now();
     if (now - lastKeyRequestAt < 1000 || !child?.stdin.writable) return;
     lastKeyRequestAt = now;
+    keyRequests++;
     child.stdin.write('{"type":"keyframe"}\n');
   }
   function checkKeyframe(): void {
-    if (!waitingForKey || ws.readyState !== WebSocket.OPEN) { clearInterval(keyTimer); keyTimer = undefined; return; }
+    if (!keyframeRequested || ws.readyState !== WebSocket.OPEN) { clearInterval(keyTimer); keyTimer = undefined; return; }
     if (!flowPaused && ws.bufferedAmount <= dropBacklog / 4) requestKeyframe();
   }
-  function awaitKeyframe(): void {
-    waitingForKey = true;
-    // Also covers a still screen, where no further frame would arrive to trigger the check.
+  function scheduleKeyframe(): void {
+    keyframeRequested = true;
     keyTimer ??= setInterval(checkKeyframe, 250);
     checkKeyframe();
+  }
+  function awaitKeyframe(): void {
+    if (!waitingForKey) keyWaitSince = Date.now();
+    waitingForKey = true;
+    // Only suppress deltas after the gateway actually discarded part of the reference chain.
+    scheduleKeyframe();
   }
 
   function sendJson(value: unknown) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(value)); }
@@ -312,6 +336,7 @@ export function attachVideo(ws: WebSocket): void {
     if (type === 1 || type === 3) {
       try {
         const value = JSON.parse(payload.toString('utf8')) as Record<string, unknown>;
+        if (type === 1 && value.type === 'diag') { agentDiag = value; return; }
         if (mse && value.type === 'stream') {
           if (value.codec !== streamCodec) { fail('MSE playback requires the requested capture codec.'); return; }
           width = typeof value.width === 'number' && Number.isInteger(value.width) ? value.width : 0;
@@ -326,19 +351,33 @@ export function attachVideo(ws: WebSocket): void {
     }
     if (type !== 2 || payload.length < 2 || ws.readyState !== WebSocket.OPEN) return;
     counters.framesIn++;
+    maxBuffered = Math.max(maxBuffered, ws.bufferedAmount);
     if (flowPaused) { counters.framesDropped++; return; }
     const key = payload[0] === 1;
-    if (ws.bufferedAmount > dropBacklog && !waitingForKey) awaitKeyframe();
+    // The budget holds one keyframe on top of the burst allowance: a recovery keyframe (about 750 KB for video at 1080p)
+    // must not itself push the backlog over and start the next drop-and-wait cycle.
+    if (ws.bufferedAmount > dropBacklog + lastKeyBytes && !waitingForKey) awaitKeyframe();
     if (waitingForKey) {
       if (!key || ws.bufferedAmount > dropBacklog / 4) { counters.framesDropped++; checkKeyframe(); return; }
       waitingForKey = false;
+      keyWaits++;
+      keyWaitMaxMs = Math.max(keyWaitMaxMs, Date.now() - keyWaitSince);
     }
     const before = ws.bufferedAmount;
     const sent = mse ? sendMseFrame(payload, key) : (ws.send(payload, { binary: true }), true);
     if (sent) {
       counters.framesSent++;
+      if (key) {
+        keyframeRequested = false;
+        if (keyTimer) { clearInterval(keyTimer); keyTimer = undefined; }
+      }
       if (key) counters.keyframes++;
       counters.bytesSent += Math.max(payload.length, ws.bufferedAmount - before);
+      if (key) lastKeyBytes = payload.length;
+      const sentAt = Date.now();
+      if (lastSentAt) maxSendGap = Math.max(maxSendGap, sentAt - lastSentAt);
+      lastSentAt = sentAt;
+      if (key) maxKeyBytes = Math.max(maxKeyBytes, payload.length); else maxDeltaBytes = Math.max(maxDeltaBytes, payload.length);
     }
     if (sent && key && startupTimer) { clearTimeout(startupTimer); startupTimer = undefined; }
   }
@@ -397,10 +436,14 @@ export function attachVideo(ws: WebSocket): void {
         return;
       }
       started = true;
-      dropBacklog = Math.max(512_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.2));
+      dropBacklog = hostPlatform === 'darwin'
+        ? Math.max(1_000_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.4))
+        : Math.max(512_000, Math.round(qualityBitrate[selectedQuality] / 8 * 0.2));
       // Local cursor: the browser draws the pointer with no round trip; the agent hides it from the video
       // and reports its shape instead.
-      const agentArgs = [codec as Codec, selectedQuality, ...(event.cursor === 'local' ? ['local-cursor'] : [])];
+      const agentArgs = [codec as Codec, selectedQuality, ...(event.cursor === 'local' ? ['local-cursor'] : []),
+        // WebCodecs on macOS: no periodic keyframes, only requested ones (see the agent's encoder setup).
+        ...(hostPlatform === 'darwin' && !mse ? ['on-demand-keyframes'] : [])];
       const scriptAgent = agentPath.endsWith('.mjs');
       child = spawn(scriptAgent ? process.execPath : agentPath, scriptAgent ? [agentPath, ...agentArgs] : agentArgs, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
       const capture = child;
@@ -432,6 +475,27 @@ export function attachVideo(ws: WebSocket): void {
       sendJson({ type: 'stats', ...counters, buffered: ws.bufferedAmount, rssMb: Math.round(process.memoryUsage().rss / 1048576), uptimeMs: now - openedAt, ...(load > 0 ? { load: Math.round(load * 100) / 100 } : {}) });
       return;
     }
+    if (event.type === 'diag') {
+      const keys = ['rendered', 'dropped', 'late', 'resets', 'smoothing', 'gap', 'queue', 'rtt'] as const;
+      if (!keys.every((key) => typeof event[key] === 'number' && Number.isFinite(event[key]))) return;
+      const diag = Object.fromEntries(keys.map((key) => [key, event[key] as number])) as Record<string, number>;
+      // Added later; older cached pages omit them.
+      const extra = (key: string) => typeof event[key] === 'number' && Number.isFinite(event[key]) ? event[key] as number : '?';
+      const previous = lastClientDiag ?? { rendered: 0, dropped: 0, late: 0, resets: 0 };
+      const delta = (key: string) => Math.max(0, diag[key] - previous[key]);
+      const gatewayDropped = counters.framesDropped - lastDiagCounters.framesDropped;
+      const encoderDrops = typeof agentDiag.encoderDrops === 'number' ? agentDiag.encoderDrops : 0;
+      if (diag.gap >= 300 || delta('dropped') || delta('late') || delta('resets') || gatewayDropped || keyWaits || encoderDrops) {
+        console.info(`${new Date().toISOString()} Video hitch: longest gap ${diag.gap} ms, shown ${delta('rendered')}/5s`
+          + ` · browser dropped +${delta('dropped')} late +${delta('late')} (${extra('lateNearKey')} after a keyframe, max ${extra('lateMax')} ms) jitter peak ${extra('jitter')} ms decode max ${extra('decodeMax')} ms page blocked max ${extra('block')} ms resets +${delta('resets')} smoothing ${diag.smoothing} ms queue ${diag.queue} rtt ${diag.rtt} ms`
+          + ` · gateway in ${counters.framesIn - lastDiagCounters.framesIn} sent ${counters.framesSent - lastDiagCounters.framesSent} dropped ${gatewayDropped} keyframes ${counters.keyframes - lastDiagCounters.keyframes} key waits ${keyWaits}${waitingForKey ? '+waiting' : ''} (max ${keyWaitMaxMs} ms) key requests ${keyRequests} largest keyframe ${Math.round(maxKeyBytes / 1024)} KB delta ${Math.round(maxDeltaBytes / 1024)} KB longest send gap ${maxSendGap} ms max buffered ${Math.round(maxBuffered / 1024)} KB now ${Math.round(ws.bufferedAmount / 1024)} KB`
+          + ` · agent captured ${agentDiag.captured ?? '?'} repeated ${agentDiag.repeated ?? '?'} encoder drops ${encoderDrops}`);
+      }
+      lastClientDiag = diag;
+      lastDiagCounters = { ...counters };
+      keyWaits = 0; keyWaitMaxMs = 0; keyRequests = 0; maxKeyBytes = 0; maxDeltaBytes = 0; maxSendGap = 0; maxBuffered = ws.bufferedAmount;
+      return;
+    }
     if (event.type === 'flow' && typeof event.paused === 'boolean') {
       flowPaused = event.paused;
       if (!flowPaused) awaitKeyframe();
@@ -439,8 +503,8 @@ export function attachVideo(ws: WebSocket): void {
     }
     if (!started || !child?.stdin.writable) return;
     if (child.stdin.writableLength > 128 * 1024) { fail('Capture input is not responding.'); return; }
-    // The browser reset its decoder and needs a fresh keyframe; same once-a-second limit as the gateway's own requests.
-    if (event.type === 'keyframe') { requestKeyframe(); return; }
+    // Request a new recovery point without breaking the intact stream while the encoder prepares it.
+    if (event.type === 'keyframe') { scheduleKeyframe(); return; }
     const type = event.type;
     if (type === 'move' && typeof event.x === 'number' && typeof event.y === 'number' && Number.isFinite(event.x) && Number.isFinite(event.y)) {
       const line = JSON.stringify({ type, x: Math.max(0, Math.min(1, event.x)), y: Math.max(0, Math.min(1, event.y)) }) + '\n';

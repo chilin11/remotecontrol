@@ -52,7 +52,7 @@ export function StatsPanel({ client, quality, onClose }: { client: VideoClient |
     ['Round trip', s.rttMs === undefined ? '—' : `${Math.round(s.rttMs)} ms (min ${Math.round(s.rttMinMs ?? s.rttMs)})`],
     ['Frames', `${s.framesRendered.toLocaleString()} shown · ${s.framesDropped.toLocaleString()} dropped`],
     ['Keyframes', `${s.keyframes} · last ${formatBytes(s.lastKeyframeBytes)}`],
-    [s.playback === 'mse' ? 'Buffer' : 'Decode queue', s.playback === 'mse' ? `${(s.bufferedSec * 1000).toFixed(0)} ms · ${formatBytes(s.queuedBytes)} queued${s.flowPaused ? ' · PAUSED' : ''}` : `${s.decodeQueue} frames · ${s.decoderResets} resets`],
+    [s.playback === 'mse' ? 'Buffer' : 'Decode queue', s.playback === 'mse' ? `${(s.bufferedSec * 1000).toFixed(0)} ms · ${formatBytes(s.queuedBytes)} queued${s.flowPaused ? ' · PAUSED' : ''}` : `${s.decodeQueue} frames · ${s.decoderResets} resets · ${s.playoutMs ?? 0} ms smoothing · ${s.framesLate ?? 0} late`],
     ['Received', `${formatBytes(s.bytes)} · ${s.packets.toLocaleString()} packets`],
     ['Input', `${s.inputsSent.toLocaleString()} events · uplink ${formatBytes(s.uplinkBuffered)}`],
     ['Session', formatDuration(s.connectedMs)],

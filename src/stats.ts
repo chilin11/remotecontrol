@@ -11,6 +11,10 @@ export type VideoStats = {
   bytes: number; packets: number; keyframes: number; lastKeyframeBytes: number;
   framesRendered: number; framesDropped: number; decoderResets: number;
   decodeQueue: number; bufferedSec: number; queuedBytes: number;
+  /** Delay the canvas playout buffer currently adds to smooth arrival jitter. */
+  playoutMs?: number;
+  /** Frames shown more than an interval after their playout time: hitches the buffer did not absorb. */
+  framesLate?: number;
   rttMs?: number; rttMinMs?: number; uplinkBuffered: number; inputsSent: number; flowPaused: boolean;
   server?: ServerStats;
 };

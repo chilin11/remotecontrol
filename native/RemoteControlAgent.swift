@@ -10,6 +10,9 @@ private let codecName = CommandLine.arguments.dropFirst().first ?? "hevc"
 private let qualityName = CommandLine.arguments.dropFirst(2).first ?? "1080p30"
 // Local cursor: the browser draws the pointer itself, so keep it out of the video and report its shape.
 private let localCursor = CommandLine.arguments.dropFirst(3).contains("local-cursor")
+// WebCodecs playback: keyframes only when the gateway or browser asks for one. MSE playback keeps periodic ones (removing
+// played data from a SourceBuffer also drops everything up to the next keyframe).
+private let onDemandKeyframes = CommandLine.arguments.dropFirst(3).contains("on-demand-keyframes")
 private let codecType: CMVideoCodecType = codecName == "h264" ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC
 
 private struct Quality {
@@ -81,13 +84,23 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
     var clickCount: Int64 = 1
     var clickDragged = false
     var pressPoint = CGPoint.zero
-    // Capture-queue state: the newest screen image, so a keyframe can be produced even while the screen is still
-    // (ScreenCaptureKit delivers no frames then, and the keyframe interval counts frames, not time).
+    // Capture-queue state: the newest screen image, re-encoded to keep a constant frame rate while ScreenCaptureKit
+    // delivers fewer frames (still screen, lower-rate video) and to produce an on-demand keyframe.
     let captureQueue = DispatchQueue(label: "remotecontrol.capture")
     private var lastImage: CVImageBuffer?
     private var lastPTS = CMTime.invalid
     private var lastEncodedAt: TimeInterval = 0
     private var forceKeyframe = false
+    private var slotTimer: DispatchSourceTimer?
+    private let frameInterval = 1.0 / Double(quality.fps)
+    // Whether the current frame interval already produced a frame, and whether a newer image waits for the next one.
+    private var slotUsed = false
+    private var slotPending = false
+    // Diagnostics, reported to the gateway every 5 s: captured and repeated frames, frames the encoder dropped.
+    private var slotTicks = 0
+    private var capturedFrames = 0
+    private var repeatedFrames = 0
+    fileprivate var encoderDrops = 0
 
     func start() async throws {
         guard codecName == "hevc" || codecName == "h264" else { throw NSError(domain: "RemoteControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported codec"]) }
@@ -123,6 +136,12 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         self.stream = stream
         let codecString = codecName == "hevc" ? "hvc1.1.6.L\(hevcLevel(width, height, quality.fps)).B0" : String(format: "avc1.42E0%02X", h264Level(width, height, quality.fps))
         writer.json(["type": "stream", "codec": codecName, "codecString": codecString, "width": width, "height": height, "fps": quality.fps])
+        // Capture-queue clock for the constant frame rate (see endFrameSlot).
+        let slotTimer = DispatchSource.makeTimerSource(flags: .strict, queue: captureQueue)
+        slotTimer.setEventHandler { [weak self] in self?.endFrameSlot() }
+        slotTimer.schedule(deadline: .now() + frameInterval, repeating: frameInterval)
+        slotTimer.resume()
+        self.slotTimer = slotTimer
         try await stream.startCapture()
         DispatchQueue.global(qos: .userInteractive).async { self.readInput() }
         if localCursor { startCursorUpdates() }
@@ -167,16 +186,24 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         var created: VTCompressionSession?
         let ref = Unmanaged.passUnretained(self).toOpaque()
         let hardware: CFDictionary = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true] as CFDictionary
-        let status = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: Int32(width), height: Int32(height), codecType: codecType, encoderSpecification: hardware, imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: { refcon, _, status, _, buffer in
-            guard status == noErr, let refcon, let buffer else { return }
-            Unmanaged<Agent>.fromOpaque(refcon).takeUnretainedValue().writeEncoded(buffer)
+        let status = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: Int32(width), height: Int32(height), codecType: codecType, encoderSpecification: hardware, imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: { refcon, _, status, flags, buffer in
+            guard let refcon else { return }
+            let agent = Unmanaged<Agent>.fromOpaque(refcon).takeUnretainedValue()
+            guard status == noErr, !flags.contains(.frameDropped), let buffer else { agent.captureQueue.async { agent.encoderDrops += 1 }; return }
+            agent.writeEncoded(buffer)
         }, refcon: ref, compressionSessionOut: &created)
         guard status == noErr, let created else { throw NSError(domain: "RemoteControl", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Video encoder could not start"]) }
         encoder = created
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: quality.bitrate as CFNumber)
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: quality.fps as CFNumber)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: quality.fps as CFNumber)
+        // A keyframe is tens of times a delta (about 750 KB for video at 1080p) and arrives late over a tunnel: a visible
+        // hitch each time. Over a reliable WebSocket only a drop needs one, and drops request one on demand, so periodic
+        // keyframes are pushed out to an hour unless MSE needs them (the stream runs at a constant rate: every 4 s).
+        // Leaving the interval unset is not "unlimited": the hardware encoder then inserts one every 30 frames.
+        let keyframeSeconds = onDemandKeyframes ? 3600 : 4
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (quality.fps * keyframeSeconds) as CFNumber)
+        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeSeconds as CFNumber)
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         // Emit every frame as soon as it is encoded instead of holding frames for rate-control lookahead.
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
@@ -188,7 +215,26 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen, sampleBuffer.isValid, let image = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lastImage = image
-        encode(image, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        capturedFrames += 1
+        // Encode at once unless this frame slot already has a frame; then the newest image goes out at the next slot.
+        if slotUsed { slotPending = true } else { encode(image, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) }
+    }
+
+    /// Capture queue only, every frame interval. ScreenCaptureKit sends frames only when the screen changes and not in
+    /// step with the declared rate (a 24 fps video yields 24 captures a second in a 30 fps stream). MSE timestamps count
+    /// frames, so anything but exactly one frame per interval drains its buffer and playback stutters; the decoder and
+    /// rate control would also see long gaps followed by bursts. Like the Windows agent's constant-rate capture, every
+    /// slot gets exactly one frame: an empty slot repeats the newest image (a near-empty delta), and an image that
+    /// arrived in an already filled slot is sent at the start of the next one.
+    private func endFrameSlot() {
+        slotTicks += 1
+        if slotTicks >= quality.fps * 5 {
+            writer.json(["type": "diag", "captured": capturedFrames, "repeated": repeatedFrames, "encoderDrops": encoderDrops])
+            slotTicks = 0; capturedFrames = 0; repeatedFrames = 0; encoderDrops = 0
+        }
+        if !slotUsed { repeatedFrames += 1; encodeLastImage() }
+        slotUsed = false
+        if slotPending { slotPending = false; encodeLastImage() }
     }
 
     /// Capture queue only.
@@ -199,19 +245,26 @@ final class Agent: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendab
         if lastPTS.isValid && pts <= lastPTS { pts = lastPTS + CMTime(value: 1, timescale: 1000) }
         lastPTS = pts
         lastEncodedAt = ProcessInfo.processInfo.systemUptime
+        slotUsed = true
         let properties: CFDictionary? = forceKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary : nil
         forceKeyframe = false
         VTCompressionSessionEncodeFrame(encoder, imageBuffer: image, presentationTimeStamp: pts, duration: .invalid, frameProperties: properties, sourceFrameRefcon: nil, infoFlagsOut: nil)
     }
 
-    /// The gateway or browser dropped frames and waits for a keyframe: encode the newest image as one now.
+    /// Capture queue only: re-encode the newest image, advancing the timestamp by the real time since the last frame
+    /// so rate control sees the true gap.
+    private func encodeLastImage() {
+        guard let image = lastImage, lastPTS.isValid else { return }
+        let elapsed = max(frameInterval, ProcessInfo.processInfo.systemUptime - lastEncodedAt)
+        encode(image, at: lastPTS + CMTime(seconds: elapsed, preferredTimescale: 90_000))
+    }
+
+    /// The gateway or browser dropped frames and waits for a keyframe: encode the newest image as one, now if this
+    /// frame slot is still free, otherwise at the next slot.
     private func requestKeyframe() {
         captureQueue.async {
             self.forceKeyframe = true
-            guard let image = self.lastImage, self.lastPTS.isValid else { return }
-            // Advance the timestamp by the real time since the last frame so rate control sees the true gap.
-            let elapsed = max(1.0 / Double(quality.fps), ProcessInfo.processInfo.systemUptime - self.lastEncodedAt)
-            self.encode(image, at: self.lastPTS + CMTime(seconds: elapsed, preferredTimescale: 90_000))
+            if self.slotUsed { self.slotPending = true } else { self.encodeLastImage() }
         }
     }
 

@@ -13,6 +13,10 @@ export function sameCodecFamily(expected: string | undefined, actual: unknown): 
 }
 type Codec = 'hevc' | 'h264';
 type Playback = 'canvas' | 'mse';
+// Canvas playout: the most delay added to absorb arrival jitter, and how long a jitter peak is held before the
+// buffer shrinks again.
+const MAX_PLAYOUT_MS = 250;
+const PLAYOUT_HOLD_MS = 5000;
 type StreamInfo = { codec: Codec; codecString: string; width: number; height: number; fps?: number; format?: string; encoder?: string };
 /** Remote pointer shape: a PNG at `scale` device pixels per CSS pixel, hotspot in CSS pixels. */
 export type RemoteCursor = { image: string; x: number; y: number; scale: number };
@@ -77,6 +81,34 @@ export class VideoClient {
   private framesRendered = 0;
   private framesDropped = 0;
   private decoderResets = 0;
+  private lastDecodeKeyRequest = -Infinity;
+  // Canvas playout buffer (see schedulePlayout): chunks waiting for their decode time, and the arrival-delay estimate.
+  private playout: { chunk: EncodedVideoChunk; due: number }[] = [];
+  private playoutTimer?: ReturnType<typeof setTimeout>;
+  private playoutBase?: number;
+  private playoutSpread = 0;
+  private playoutPeakAt = 0;
+  private lastArrival = 0;
+  private playoutLate = 0;
+  // Each decoding chunk's due time by timestamp, and hitch counters for the gateway's diagnostics log.
+  private presentDue = new Map<number, number>();
+  private framesLate = 0;
+  // Per 5 s report: late frames within half a second after a keyframe, the most a frame was late, and the largest
+  // arrival delay above the fastest one (uncapped), i.e. the buffer that would have absorbed every clump.
+  private lastKeySequence = -Infinity;
+  private lateNearKey = 0;
+  private lateMaxMs = 0;
+  private jitterPeakMs = 0;
+  // Also per report: the longest decode (chunk handed to the decoder until its frame is out) and the longest stall of
+  // this page's main thread (a 50 ms timer firing late), to tell a slow decoder or a busy page from a late network.
+  private decodeAt = new Map<number, number>();
+  private decodeMaxMs = 0;
+  private mainBlockMs = 0;
+  private lastTick = 0;
+  private lastRenderAt = 0;
+  private longestRenderGap = 0;
+  private diagTimer?: ReturnType<typeof setInterval>;
+  private blockTimer?: ReturnType<typeof setInterval>;
   private inputsSent = 0;
   private pingSentAt = 0;
   private rttMs?: number;
@@ -104,6 +136,7 @@ export class VideoClient {
       framesRendered: this.playback === 'mse' ? quality?.totalVideoFrames ?? 0 : this.framesRendered,
       framesDropped: this.framesDropped + (this.playback === 'mse' ? quality?.droppedVideoFrames ?? 0 : 0),
       decoderResets: this.decoderResets, decodeQueue: this.decoder?.decodeQueueSize ?? 0,
+      playoutMs: this.playoutBase === undefined ? 0 : Math.round(this.playoutSpread), framesLate: this.framesLate,
       bufferedSec, queuedBytes: this.queuedBytes,
       rttMs: this.rttMs, rttMinMs: this.rttMinMs, uplinkBuffered: this.ws?.bufferedAmount ?? 0, inputsSent: this.inputsSent, flowPaused: this.flowPaused,
       server: this.serverStats,
@@ -173,6 +206,18 @@ export class VideoClient {
       this.connectedAt = this.lastPong;
       ws.send(JSON.stringify({ type: 'start', codec: choice!.codec, quality, ...(this.playback === 'mse' ? { format: 'mse' } : {}), ...(localCursor ? { cursor: 'local' } : {}) }));
       this.ping();
+      // Playback counters for the host's log, so a stall can be traced to the link, the gateway or this decoder.
+      this.diagTimer = setInterval(() => {
+        const s = this.stats();
+        this.sendImmediate({ type: 'diag', rendered: s.framesRendered, dropped: s.framesDropped, late: s.framesLate ?? 0, resets: s.decoderResets, smoothing: s.playoutMs ?? 0, gap: Math.round(this.longestRenderGap), queue: s.decodeQueue, rtt: Math.round(s.rttMs ?? 0), lateNearKey: this.lateNearKey, lateMax: Math.round(this.lateMaxMs), jitter: Math.round(this.jitterPeakMs), decodeMax: Math.round(this.decodeMaxMs), block: Math.round(this.mainBlockMs) });
+        this.longestRenderGap = 0; this.lateNearKey = 0; this.lateMaxMs = 0; this.jitterPeakMs = 0; this.decodeMaxMs = 0; this.mainBlockMs = 0;
+      }, 5000);
+      this.lastTick = performance.now();
+      this.blockTimer = setInterval(() => {
+        const now = performance.now();
+        this.mainBlockMs = Math.max(this.mainBlockMs, now - this.lastTick - 50);
+        this.lastTick = now;
+      }, 50);
       this.startupTimer = setTimeout(() => {
         if (!this.ready && !this.stopped) this.onError(`${this.codec === 'hevc' ? 'HEVC' : 'H.264'} decoding failed to start.`);
       }, hevcMseVideo && choice!.codec === 'hevc' ? 20_000 : 12_000);
@@ -207,7 +252,7 @@ export class VideoClient {
       }
     };
     ws.onerror = () => this.onError('Video connection failed.');
-    ws.onclose = (event) => { if (this.heartbeat) clearInterval(this.heartbeat); if (!this.stopped) this.onClose(event.code); };
+    ws.onclose = (event) => { if (this.heartbeat) clearInterval(this.heartbeat); if (this.diagTimer) clearInterval(this.diagTimer); if (this.blockTimer) clearInterval(this.blockTimer); if (!this.stopped) this.onClose(event.code); };
   }
 
   private ping(): void {
@@ -253,17 +298,11 @@ export class VideoClient {
   private configureDecoder(codecString: string): void {
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = new VideoDecoder({
-      output: (frame) => {
-        // desynchronized: draw straight to the screen instead of waiting for the next compositor frame.
-        const context = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
-        if (context) context.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
-        frame.close();
-        this.framesRendered++;
-        this.markReady();
-      },
+      output: (frame) => this.drawFrame(frame),
       error: () => this.onError('Video decoding failed.'),
     });
     this.codecString = codecString;
+    this.resetPlayout();
     this.decoder.configure({ codec: codecString, codedWidth: this.canvas.width, codedHeight: this.canvas.height, hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true });
     this.waitingForKey = true;
   }
@@ -384,21 +423,120 @@ export class VideoClient {
     if (!this.decoder || packet.length < 2) return;
     const key = packet[0] === 1;
     if (key) { this.keyframes++; this.lastKeyframeBytes = packet.length - 1; }
-    // Decoder is behind: drop the backlog and resume at the next keyframe. That freezes the picture until the
-    // next keyframe (up to 1 s), so tolerate ~150 ms of queue (9 frames at 60 fps) before giving up on it.
-    if (this.decoder.decodeQueueSize > Math.max(4, Math.round(this.fps * 0.15))) {
-      this.framesDropped += this.decoder.decodeQueueSize;
+    const queued = this.decoder.decodeQueueSize;
+    const softLimit = Math.max(4, Math.round(this.fps * 0.15));
+    const hardLimit = Math.max(12, Math.round(this.fps * 0.4));
+    // A short delivery burst (frames held up in a tunnel arriving together) drains normally and needs no keyframe:
+    // the host sends keyframes only on request, and one is hundreds of KB on a link that is already backed up.
+    // If it is still behind when a keyframe arrives, restart on that very packet (no frozen wait for another one).
+    // Only severe overload discards deltas before a recovery point is available.
+    if (queued > hardLimit || (key && queued > softLimit)) {
+      this.framesDropped += this.decoder.decodeQueueSize + this.playout.length;
       this.decoderResets++;
       this.decoder.reset();
       this.decoder.configure({ codec: this.codecString!, codedWidth: this.canvas.width, codedHeight: this.canvas.height, hardwareAcceleration: 'prefer-hardware', optimizeForLatency: true });
+      this.resetPlayout();
       this.waitingForKey = true;
-      // A host that only encodes on screen changes may not send its next keyframe for seconds: ask for one.
-      this.sendImmediate({ type: 'keyframe' });
+      if (!key) this.requestDecodeKeyframe();
     }
     if (this.waitingForKey && !key) { this.framesDropped++; return; }
-    if (key) this.waitingForKey = false;
+    if (key) { this.waitingForKey = false; this.lastKeySequence = this.sequence + 1; }
     const chunk = new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: Math.round((++this.sequence * 1_000_000) / this.fps), data: packet.subarray(1) });
-    try { this.decoder.decode(chunk); } catch { this.onError('Video decoder rejected a frame.'); }
+    this.schedulePlayout(chunk, performance.now());
+  }
+
+  /**
+   * Playout buffer. The host sends exactly one frame per interval, so a chunk's timestamp is the host's clock; but
+   * a tunnel (cloudflared, HTTP/2, QUIC) or a large keyframe delivers frames in clumps. Decoding on arrival then draws
+   * several frames in one display refresh and holds the last one: the frame rate looks fine yet motion stutters.
+   * Each frame is due at its timestamp plus an offset covering the recent arrival spread, so clumps are spread back
+   * out. On a steady link the spread, and the added delay, stays near zero.
+   */
+  private schedulePlayout(chunk: EncodedVideoChunk, now: number): void {
+    const media = chunk.timestamp / 1000;
+    const delay = now - media;
+    const elapsed = now - this.lastArrival;
+    this.lastArrival = now;
+    const over = this.playoutBase === undefined ? 0 : delay - this.playoutBase;
+    this.jitterPeakMs = Math.max(this.jitterPeakMs, over);
+    // Frames dropped upstream shift the host clock: every later frame is late beyond the cap and would go unpaced.
+    this.playoutLate = over > MAX_PLAYOUT_MS ? this.playoutLate + 1 : 0;
+    if (this.playoutBase === undefined || over > 1000 || this.playoutLate > this.fps / 2) {
+      // First frame, a long gap, or half a second of persistently late frames: restart the estimate at this frame.
+      this.playoutLate = 0;
+      this.playoutBase = delay;
+      this.playoutSpread = 0;
+      this.playoutPeakAt = now;
+    } else {
+      // The fastest arrival, slowly forgotten (2 ms/s) so a lasting latency rise is absorbed without a step. A new
+      // fastest arrival keeps the absolute offset: the frames that defined the spread were still that late.
+      const base = this.playoutBase + elapsed * 0.002;
+      if (delay < base) this.playoutSpread = Math.max(0, Math.min(MAX_PLAYOUT_MS, this.playoutSpread + this.playoutBase - delay));
+      this.playoutBase = Math.min(delay, base);
+      // The spread jumps up to cover a late frame and holds that peak for a while: tunnel stalls and keyframes recur
+      // every few seconds, and a buffer that had already shrunk again would stutter on each one. Then it eases down
+      // at 10 ms/s, an invisible 1 % speed-up.
+      const sample = delay - this.playoutBase;
+      if (sample >= this.playoutSpread) { this.playoutSpread = Math.min(MAX_PLAYOUT_MS, sample); this.playoutPeakAt = now; }
+      else if (now - this.playoutPeakAt > PLAYOUT_HOLD_MS) this.playoutSpread = Math.max(sample, this.playoutSpread - elapsed * 0.01);
+    }
+    this.playout.push({ chunk, due: media + this.playoutBase + this.playoutSpread });
+    if (!this.playoutTimer) this.pumpPlayout();
+  }
+
+  private pumpPlayout(): void {
+    this.playoutTimer = undefined;
+    const now = performance.now();
+    // A background tab throttles timers to about 1 Hz: never hold more than a second of video.
+    while (this.playout.length && (this.playout[0].due <= now + 1 || this.playout.length > this.fps)) {
+      const { chunk, due } = this.playout.shift()!;
+      if (this.presentDue.size > 64) this.presentDue.clear();
+      this.presentDue.set(chunk.timestamp, due);
+      if (this.decodeAt.size > 64) this.decodeAt.clear();
+      this.decodeAt.set(chunk.timestamp, now);
+      try { this.decoder?.decode(chunk); } catch { this.onError('Video decoder rejected a frame.'); return; }
+    }
+    if (this.playout.length) this.playoutTimer = setTimeout(() => this.pumpPlayout(), this.playout[0].due - now);
+  }
+
+  /** Draws a decoded frame at once: holding decoder output frames can starve the hardware decoder's small pool. */
+  private drawFrame(frame: VideoFrame): void {
+    const now = performance.now();
+    const due = this.presentDue.get(frame.timestamp) ?? now;
+    this.presentDue.delete(frame.timestamp);
+    const decodedFrom = this.decodeAt.get(frame.timestamp);
+    if (decodedFrom !== undefined) { this.decodeMaxMs = Math.max(this.decodeMaxMs, now - decodedFrom); this.decodeAt.delete(frame.timestamp); }
+    // A frame shown more than an interval after it was due is a visible hitch the playout buffer did not absorb.
+    if (now - due > 1000 / this.fps) {
+      this.framesLate++;
+      this.lateMaxMs = Math.max(this.lateMaxMs, now - due);
+      if (Math.round(frame.timestamp * this.fps / 1_000_000) - this.lastKeySequence <= this.fps / 2) this.lateNearKey++;
+    }
+    if (this.framesRendered) this.longestRenderGap = Math.max(this.longestRenderGap, now - this.lastRenderAt);
+    this.lastRenderAt = now;
+    // desynchronized: draw straight to the screen instead of waiting for the next compositor frame.
+    const context = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
+    if (context) context.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+    frame.close();
+    this.framesRendered++;
+    this.markReady();
+  }
+
+  private resetPlayout(): void {
+    if (this.playoutTimer) { clearTimeout(this.playoutTimer); this.playoutTimer = undefined; }
+    this.presentDue.clear();
+    this.decodeAt.clear();
+    this.playout = [];
+    this.playoutBase = undefined;
+    this.playoutSpread = 0;
+    this.playoutLate = 0;
+  }
+
+  private requestDecodeKeyframe(): void {
+    const now = Date.now();
+    if (now - this.lastDecodeKeyRequest < 1000) return;
+    this.lastDecodeKeyRequest = now;
+    this.sendImmediate({ type: 'keyframe' });
   }
 
   sendInput(value: Record<string, unknown>): void {
@@ -417,12 +555,12 @@ export class VideoClient {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (ws.bufferedAmount > 64 * 1024) {
-      if (value.type === 'move' || value.type === 'wheel' || value.type === 'keyframe') return;
+      if (value.type === 'move' || value.type === 'wheel' || value.type === 'keyframe' || value.type === 'diag') return;
       ws.close();
       return;
     }
     ws.send(JSON.stringify(value));
-    if (value.type !== 'ping' && value.type !== 'stats' && value.type !== 'flow' && value.type !== 'keyframe') this.inputsSent++;
+    if (value.type !== 'ping' && value.type !== 'stats' && value.type !== 'flow' && value.type !== 'keyframe' && value.type !== 'diag') this.inputsSent++;
   }
 
   sendText(text: string): Promise<void> {
@@ -467,8 +605,11 @@ export class VideoClient {
   close(): void {
     if (this.stopped) return;
     if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
+    if (this.diagTimer) { clearInterval(this.diagTimer); this.diagTimer = undefined; }
+    if (this.blockTimer) { clearInterval(this.blockTimer); this.blockTimer = undefined; }
     if (this.startupTimer) { clearTimeout(this.startupTimer); this.startupTimer = undefined; }
     this.stopped = true;
+    this.resetPlayout();
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) this.ws.close();
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.mseQueue = [];
